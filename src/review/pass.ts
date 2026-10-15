@@ -72,6 +72,8 @@ export interface PassProvenance {
   task: string;
   maxTurns: number;
   maxMinutes: number;
+  /** sha256 of the bundle the pass read. */
+  bundle: string;
 }
 
 export interface PassOptions {
@@ -309,12 +311,16 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
       if (done) break;
     }
     if (rec.outcome === 'running') rec.outcome = 'turns-exhausted';
+    // Every ending is saved before the provider is closed (stalled and submitted saved in the loop).
+    if (rec.outcome === 'turns-exhausted' || rec.outcome === 'time-exhausted') await checkpoint();
   } catch (e) {
     if (e instanceof CancelledError && deadline.signal.aborted && !o.signal?.aborted) rec.outcome = 'time-exhausted';
     else {
       rec.outcome = 'failed';
       rec.error = (e as Error).message;
     }
+    // A save that fails again is left to the caller's final save.
+    await checkpoint().catch(() => undefined);
   } finally {
     clearTimeout(deadlineTimer);
     o.signal?.removeEventListener('abort', onHalt);

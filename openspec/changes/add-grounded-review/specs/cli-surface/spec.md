@@ -37,7 +37,7 @@ A text-protocol tool call SHALL take its arguments from `args`, else from `argum
 - **THEN** no call runs, and the nudge names `board`, the `<invoke>` block and `{"tool": "board", "args": { ... }}`
 
 ### Requirement: Resuming a killed run
-`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled) under the same model, prompt templates and budgets as the resumed run, keep any other sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt.
+`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled) under the same model, prompt templates, budgets and bundle as the resumed run, keep any other sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt.
 
 #### Scenario: One pass failed
 - **WHEN** a record holds seven submitted passes and one that failed, and `--resume` is run

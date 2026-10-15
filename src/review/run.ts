@@ -213,8 +213,8 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   const system = systemPrompt(digest(bundle));
 
   // 3. passes
-  // A kept pass must have asked what this run would ask, or the lockfile's single model, prompt
-  // hashes and budgets would claim it ran under settings it never saw.
+  // A kept pass must have asked what this run would ask, of the same bundle, or the lockfile's single
+  // model, prompt hashes, budgets and bundle would claim it ran under settings it never saw.
   const provenance = (domain: string): PassProvenance => ({
     templateVersion: TEMPLATE_VERSION,
     rules: sha256(RULES),
@@ -222,6 +222,7 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
     task: sha256(domainTask(domain, o.maxTurns)),
     maxTurns: o.maxTurns,
     maxMinutes: o.maxMinutes,
+    bundle: bundleSha,
   });
   const sameRun = (prior: PassRecord, domain: string) => {
     const want = provenance(domain);

@@ -457,6 +457,7 @@ program
         const { runReview, replayReview } = await import('./review/run.js');
         if (opts.replay) {
           const r = await replayReview(opts.replay, { ...(opts.tools ? { tools: opts.tools } : {}), log, signal: cancel.signal });
+          if (cancelCode) throw new Error('cancelled');
           if (json) console.log(JSON.stringify(r, null, 2));
           else console.log(r.identical ? `replay identical: ${r.replayReport}` : `replay DIFFERS: compare ${r.report} with ${r.replayReport} (a replay runs from the directory the review ran in)`);
           process.exit(r.identical ? 0 : 1);

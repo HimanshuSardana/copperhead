@@ -280,6 +280,9 @@ describe('review: one pass', () => {
     const saved: [number, string][] = [];
     await runPass({ domain: 'P', model: 's', provider: scriptedProvider([{ text: 'thinking' }]), tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 10, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined, onTurn: async (r) => void saved.push([r.turns, r.outcome]) });
     expect(saved).toEqual([[1, 'running'], [2, 'running'], [3, 'stalled']]);
+    saved.length = 0;
+    await runPass({ domain: 'P', model: 's', provider: scriptedProvider([{ toolCalls: [{ name: 'nets', args: {} }] }]), tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 2, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined, onTurn: async (r) => void saved.push([r.turns, r.outcome]) });
+    expect(saved).toEqual([[1, 'running'], [2, 'running'], [2, 'turns-exhausted']]);
     const full = await runPass({
       domain: 'P', model: 's', provider: scriptedProvider([{ toolCalls: [{ name: 'nets', args: {} }] }]), tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 10, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined,
       onTurn: async () => {
@@ -484,7 +487,11 @@ describe('review: the run and its record', () => {
     expect(made).toBe(1);
     await runReview({ ...again, model: 'other', maxTurns: 6 });
     expect(made).toBe(2);
-    expect(lines.filter((l) => l.includes('rerunning'))).toEqual(Array(2).fill('[P] resume: rerunning the pass, which ran with another model, prompt or budget'));
+    // A bundle changed since the pass read it reruns the pass too.
+    await writeFile(path.join(out, 'bundle.json'), JSON.stringify({ ...BUNDLE, label: 'changed' }));
+    await runReview({ ...again, model: 'other', maxTurns: 6 });
+    expect(made).toBe(3);
+    expect(lines.filter((l) => l.includes('rerunning'))).toEqual(Array(3).fill('[P] resume: rerunning the pass, which ran with another model, prompt or budget'));
     await expect(runReview({ ...base, out: path.join(root, 'none'), domains: [], model: 's', maxTurns: 5, makeProvider: async () => submitter(), log: () => undefined })).rejects.toThrow(/--domains names no domain/);
   }, 30_000);
 
