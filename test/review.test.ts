@@ -46,13 +46,13 @@ const BUNDLE = {
 };
 
 /** A copperhead-tools stand-in: records every request and answers each tool from a table. */
-function fakeTools(): ToolsClient & { calls: { tool: string; inputs: Record<string, unknown> }[] } {
-  const calls: { tool: string; inputs: Record<string, unknown> }[] = [];
+function fakeTools(): ToolsClient & { calls: { tool: string; inputs: Record<string, unknown>; cwd: string | undefined }[] } {
+  const calls: { tool: string; inputs: Record<string, unknown>; cwd: string | undefined }[] = [];
   return {
     command: ['fake-tools'],
     calls,
-    async run(tool, inputs): Promise<ToolsResult> {
-      calls.push({ tool, inputs });
+    async run(tool, inputs, opts): Promise<ToolsResult> {
+      calls.push({ tool, inputs, cwd: opts?.cwd });
       const ok = (data: Record<string, unknown>, summary: Record<string, unknown> = {}): ToolsResult => ({ status: 'ok', tool: { id: tool, version: '0' }, package: { name: 'fake', version: '0' }, data, summary });
       if (tool === 'review') {
         await mkdir(String(inputs['out-dir']), { recursive: true });
@@ -278,11 +278,11 @@ describe('review: the run and its record', () => {
     expect(lock).toMatchObject({ format: 'copperhead-review-lock', domains: ['P', 'L'], model: { id: 'scripted' } });
     expect(Object.keys(lock.templates.sha256)).toEqual(['rules', 'tools', 'task-P', 'task-L']);
     expect(await readdir(path.join(out, 'model', 'samples'))).toEqual(['L.json', 'P.json']);
-    const replay = await replayReview(out, undefined, () => undefined, tools);
+    const replay = await replayReview(out, { log: () => undefined, client: tools });
     expect(replay.identical).toBe(true);
     expect(tools.calls.filter((c) => c.tool === 'review-verify').at(-1)!.inputs.out).toBe(path.join(out, 'replay'));
     await writeFile(path.join(out, 'model', 'proposals.json'), '{"proposals": []}');
-    await expect(replayReview(out, undefined, () => undefined, tools)).rejects.toThrow(/differs from the lockfile/);
+    await expect(replayReview(out, { log: () => undefined, client: tools })).rejects.toThrow(/differs from the lockfile/);
   }, 30_000);
 
   it('resumes a killed run: keeps ended passes, reruns interrupted ones, reuses the bundle', async () => {
@@ -360,10 +360,15 @@ describe('review: the run and its record', () => {
     expect(lock).toMatchObject({ design: 'board', sweep: 'sweep-record', fab: ['fab/gerbers', path.join(elsewhere, 'bom.csv')], fabProfile: 'fab/jlc.yaml' });
     expect(JSON.stringify(lock)).not.toContain(root);
     expect(tools.calls.find((c) => c.tool === 'review-bundle')!.inputs).toMatchObject({ drop: path.join(root, 'board'), sweep: path.join(root, 'sweep-record') });
-    expect((await replayReview(record, undefined, () => undefined, tools)).identical).toBe(true);
+    // Every copperhead-tools call runs in the review's working directory, which a version 2
+    // bundle's relative paths resolve against; so does a replay, given the record's path from there.
+    expect(new Set(tools.calls.slice(1).map((c) => c.cwd))).toEqual(new Set([root]));
+    tools.calls.length = 0;
+    expect((await replayReview('reviews/r1', { cwd: root, log: () => undefined, client: tools })).identical).toBe(true);
+    expect(tools.calls.map((c) => [c.tool, c.cwd])).toEqual([['review-verify', root]]);
     // The bundle is pinned by the lockfile too.
     await writeFile(path.join(record, 'bundle.json'), '{}');
-    await expect(replayReview(record, undefined, () => undefined, tools)).rejects.toThrow(/bundle\.json differs from the lockfile/);
+    await expect(replayReview(record, { log: () => undefined, client: tools })).rejects.toThrow(/bundle\.json differs from the lockfile/);
   }, 30_000);
 
   it('refuses budgets that are not positive numbers before writing anything', async () => {

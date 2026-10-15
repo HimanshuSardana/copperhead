@@ -112,6 +112,15 @@ function positive(name: string, v: number, integer: boolean): void {
   if (!Number.isFinite(v) || v <= 0 || (integer && !Number.isInteger(v))) throw new Error(`${name} must be a positive ${integer ? 'whole number' : 'number'}, not ${v}`);
 }
 
+/**
+ * Every copperhead-tools call of a review runs in one working directory. A version 2 bundle names
+ * a file inside it relative to it, and queries, verification and replay resolve those paths against
+ * it, so a record replays from the directory its review ran in (a repository's root).
+ */
+function runningIn(cwd: string, client: ToolsClient): ToolsClient {
+  return { command: client.command, run: (tool, inputs, opts = {}) => client.run(tool, inputs, { cwd, ...opts }) };
+}
+
 async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
@@ -163,7 +172,7 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
     if (within(realOut, await canonical(input))) throw new Error(`--out must lie outside every input; it is inside ${input}`);
   }
   await mkdir(path.join(out, 'model', 'samples'), { recursive: true });
-  const tools = o.client ?? (await resolveTools(o.tools));
+  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
   const signal = o.signal;
   const sig = signal ? { signal } : {};
   const started = new Date();
@@ -280,11 +289,28 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   };
 }
 
-/** Re-verify a record's stored samples with no model, and compare the report with the recorded one. */
-export async function replayReview(record: string, toolsFlag: string | undefined, log: (line: string) => void, client?: ToolsClient, signal?: AbortSignal): Promise<{ identical: boolean; report: string; replayReport: string }> {
-  const dir = path.resolve(record);
+export interface ReplayOptions {
+  /** `--tools`: copperhead-tools cli.js or executable. */
+  tools?: string;
+  log: (line: string) => void;
+  /** The directory the review ran in, which a version 2 bundle's relative paths resolve against (default: the process's cwd). */
+  cwd?: string;
+  /** A copperhead-tools client to use instead of resolving one (tests). */
+  client?: ToolsClient;
+  signal?: AbortSignal;
+}
+
+/**
+ * Re-verify a record's stored samples with no model, and compare the report with the recorded one.
+ * It runs from the directory the review ran in, wherever the record has been copied since.
+ */
+export async function replayReview(record: string, o: ReplayOptions): Promise<{ identical: boolean; report: string; replayReport: string }> {
+  const cwd = path.resolve(o.cwd ?? process.cwd());
+  const dir = path.resolve(cwd, record);
+  const log = o.log;
+  const signal = o.signal;
   const lock = JSON.parse(await readFile(path.join(dir, 'review.lock.json'), 'utf8')) as { bundle: { sha256: string }; proposals: { sha256: string }; report: { sha256: string } };
-  const tools = client ?? (await resolveTools(toolsFlag));
+  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
   const bundlePath = path.join(dir, 'bundle.json');
   const proposalsPath = path.join(dir, 'model', 'proposals.json');
   if (sha256(await readFile(bundlePath, 'utf8')) !== lock.bundle.sha256) throw new Error('bundle.json differs from the lockfile: the bundle was changed');

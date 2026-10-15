@@ -35,3 +35,4 @@
 - [x] 5.6 SIGINT and SIGTERM cancel the run and stop its subprocesses; exit codes 0, 2, 1, 130 and 143
 - [x] 5.7 Lockfile paths relative to the working directory; replay checks the bundle's hash; a pass whose provider cannot start writes its sample and its `pass ends` line
 - [x] 5.8 Tests for each, failing before the fix; a live one-domain run, its cancel, resume and byte-identical replay
+- [x] 5.9 Run every copperhead-tools call, replay included, in the review's working directory (copperhead-tools bundle version 2 names paths relative to it); live check a record written outside a repository, copied in, and replayed from its root

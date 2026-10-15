@@ -424,7 +424,7 @@ program
   .option('--label <text>', 'the design name shown in the report')
   .option('--sweep <dir>', 'reuse a copperhead-tools review record instead of running the sweep')
   .option('--tools <path>', 'copperhead-tools cli.js or executable (default: COPPERHEAD_TOOLS, then PATH)')
-  .option('--replay <dir>', 're-verify a recorded review with no model and compare its report byte for byte')
+  .option('--replay <dir>', 're-verify a recorded review with no model and compare its report byte for byte; run it from the directory the review ran in')
   .option('--resume', 'continue the record in --out that a killed run left: keep its sweep, bundle and ended passes')
   .addHelpText(
     'after',
@@ -456,9 +456,9 @@ program
       try {
         const { runReview, replayReview } = await import('./review/run.js');
         if (opts.replay) {
-          const r = await replayReview(opts.replay, opts.tools, log, undefined, cancel.signal);
+          const r = await replayReview(opts.replay, { ...(opts.tools ? { tools: opts.tools } : {}), log, signal: cancel.signal });
           if (json) console.log(JSON.stringify(r, null, 2));
-          else console.log(r.identical ? `replay identical: ${r.replayReport}` : `replay DIFFERS: compare ${r.report} with ${r.replayReport}`);
+          else console.log(r.identical ? `replay identical: ${r.replayReport}` : `replay DIFFERS: compare ${r.report} with ${r.replayReport} (a replay runs from the directory the review ran in)`);
           process.exit(r.identical ? 0 : 1);
         }
         if (!opts.out) throw new Error('--out is required (a new directory for the review record)');

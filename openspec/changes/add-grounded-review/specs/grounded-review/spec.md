@@ -32,7 +32,7 @@ The review's report SHALL be the one `review-verify` renders from every pass's p
 - **THEN** the report holds none of them
 
 ### Requirement: Lockfile and replay
-The record SHALL hold a lockfile with the model id, the template hashes, the domains, the budgets, the fabrication inputs, and the sha256 of the bundle, the merged proposals and the report. A path the lockfile records SHALL be relative to the working directory when it lies inside it, and absolute otherwise. Samples, the merged proposals and the pass summaries in `model/passes.json` SHALL be redacted at write time. Replay SHALL refuse a record whose bundle or proposals no longer match the lockfile, and SHALL succeed only when the re-rendered report is byte-identical.
+The record SHALL hold a lockfile with the model id, the template hashes, the domains, the budgets, the fabrication inputs, and the sha256 of the bundle, the merged proposals and the report. A path the lockfile records SHALL be relative to the working directory when it lies inside it, and absolute otherwise. Samples, the merged proposals and the pass summaries in `model/passes.json` SHALL be redacted at write time. Every copperhead-tools call of a review SHALL run in the review's working directory, against which a version 2 bundle's relative paths resolve, and replay SHALL run its verification in its own working directory, so a record copied anywhere replays from the directory its review ran in. Replay SHALL refuse a record whose bundle or proposals no longer match the lockfile, and SHALL succeed only when the re-rendered report is byte-identical.
 
 #### Scenario: Tampered proposals
 - **WHEN** `model/proposals.json` is edited after the run and replay is requested
@@ -41,3 +41,7 @@ The record SHALL hold a lockfile with the model id, the template hashes, the dom
 #### Scenario: Committed record
 - **WHEN** a review runs from a repository root over `./board` with `--fab ./fab/gerbers`
 - **THEN** the lockfile records `board` and `fab/gerbers`, and no absolute path for either
+
+#### Scenario: Record written outside the repository and copied in
+- **WHEN** a review runs from a repository's root with `--sweep` and `--out` outside it, the record (without its samples) is copied into the repository, and `--replay` is run on the copy from the root
+- **THEN** the replay is identical
