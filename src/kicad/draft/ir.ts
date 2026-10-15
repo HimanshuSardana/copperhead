@@ -290,7 +290,7 @@ export async function validateIntent(
         const advice = [
           pins.length
             ? own.length
-              ? `use a footprint with a pad for every pin of the symbol (the symbol's own footprints that do: ${own.join(', ')}), or a symbol whose pin numbers match the footprint's pads`
+              ? `use a footprint with a pad for every pin of the symbol (the symbol's own footprint, ${own.join(', ')}, has one), or a symbol whose pin numbers match the footprint's pads`
               : `use a symbol whose pin numbers match the footprint's pads`
             : '',
           unpinned.length

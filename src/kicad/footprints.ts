@@ -335,15 +335,23 @@ export class FootprintResolver {
   }
 
   /**
-   * Footprints the symbol accepts that have a pad for every one of its pins, at
-   * most `cap`: what a part can change to when its footprint lacks pads for
-   * some pins and that footprint's library ships no variant that fits (a
-   * TPS62162DSG, whose own footprint is a WSON-8 with its exposed pad, drawn on
-   * a SOT-23-6). Only the first candidates are read, since each is a file.
+   * The symbol's own footprint, from its Footprint property, when it is
+   * installed and has a pad for every one of the symbol's pins: what a part can
+   * change to when its footprint lacks pads for some pins (a TPS62162DSG, whose
+   * own footprint is a WSON-8 with its exposed pad, drawn on a SOT-23-6). Only
+   * the property, not what the symbol's filters match: when the symbol itself
+   * is the wrong one (a 16-pin part drawn for a test point), its filters offer
+   * packages for that part (DIP-16), which is worse than no advice.
    */
-  async symbolFootprintsCovering(libId: string, symbolPins: ReadonlySet<string>, cap = 3): Promise<string[]> {
+  async symbolFootprintsCovering(libId: string, symbolPins: ReadonlySet<string>): Promise<string[]> {
+    let pending = this.symbolHints.get(libId);
+    if (!pending) {
+      pending = symbolFootprintHints(libId, this.symbolDirs).catch(() => null);
+      this.symbolHints.set(libId, pending);
+    }
+    const own = (await pending)?.footprint;
     const out: string[] = [];
-    for (const id of ((await this.symbolAccepts(libId)) ?? []).slice(0, 24)) {
+    for (const id of own ? [own] : []) {
       const hit = await this.lookup(id);
       if (!hit.ok) continue;
       try {
@@ -352,7 +360,6 @@ export class FootprintResolver {
       } catch {
         // unreadable or malformed: not a candidate
       }
-      if (out.length >= cap) break;
     }
     return out;
   }
