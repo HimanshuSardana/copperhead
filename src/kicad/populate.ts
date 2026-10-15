@@ -753,12 +753,14 @@ export async function populateBoard(opts: PopulateOptions): Promise<PopulateResu
   // with the fresh one, KiCad reading a code by its first declaration, so it
   // goes.
   const tops = childSpans(text, open);
-  const onANet = (sp: Span): boolean => {
-    const body = text.slice(sp.start, sp.end);
-    const code = /\(net\s+(\d+)[\s)]/.exec(body)?.[1];
-    const name = /\(net(?:_name)?\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"\)/.exec(body)?.[1];
-    return (code !== undefined && code !== '0') || !!name;
-  };
+  // read from the item's own (net …) and (net_name …) lists, never from a
+  // string inside it: a silkscreen `(gr_text "(net 1)" …)` is on no net
+  const onANet = (sp: Span): boolean =>
+    childSpans(text, sp.start).some((c) => {
+      if (c.tag !== 'net' && c.tag !== 'net_name') return false;
+      const m = /^\((?:net|net_name)\s+(?:(\d+)\s*)?(?:"((?:[^"\\]|\\.)*)")?/.exec(text.slice(c.start, c.end));
+      return (!!m?.[1] && m[1] !== '0') || !!m?.[2];
+    });
   const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onANet(sp)).length;
   if (wired) {
     throw new Error(

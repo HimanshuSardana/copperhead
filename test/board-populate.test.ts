@@ -435,7 +435,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
     }
   });
 
-  it('removes stale nets that share a line, and keeps a keepout zone that is on no net', async () => {
+  it('removes stale nets that share a line, and keeps a keepout zone and a text that are on no net', async () => {
     const { repo, cleanup } = await draftedProject();
     try {
       await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
@@ -458,8 +458,10 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         ' (connect_pads (clearance 0)) (min_thickness 0.25)' +
         ' (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed) (footprints allowed))' +
         ' (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) (polygon (pts (xy 1 1) (xy 5 1) (xy 5 5) (xy 1 5))))\n';
+      // and silkscreen text that only reads like a net
+      const label = '\t(gr_text "(net 1)" (at 10 10) (layer "F.SilkS") (uuid "6f1a3c1e-0000-4000-8000-000000000005") (effects (font (size 1 1) (thickness 0.15))))\n';
       const close = stripped.lastIndexOf(')');
-      await writeFile(board, stripped.slice(0, close) + keepout + stripped.slice(close), 'utf8');
+      await writeFile(board, stripped.slice(0, close) + keepout + label + stripped.slice(close), 'utf8');
       await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
       const again = await readFile(board, 'utf8');
       const tops = childSpans(again, again.indexOf('(kicad_pcb'));
@@ -469,6 +471,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
       expect(again).not.toContain('A_MUCH_LONGER_OLD_NAME');
       expect(again).not.toMatch(/\n[ \t]*\n/); // no line left holding only whitespace
       expect(tops.filter((x) => x.tag === 'zone')).toHaveLength(1);
+      expect(again).toContain('(gr_text "(net 1)"');
       expect(await kicadLoadError(board)).toBeNull();
     } finally {
       await cleanup();
