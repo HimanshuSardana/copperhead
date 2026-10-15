@@ -209,6 +209,10 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
     });
   };
   const close = () => o.provider.close?.();
+  // A pass that was stopped never records an ending of its own: it is cancelled or out of time.
+  const ending = () => {
+    if (stop.aborted) throw new CancelledError();
+  };
   // One provider turn: an inactivity watchdog (a turn that keeps streaming is not hung) with a
   // hard cap, rate limits retried with backoff, and cancellation that tears the turn down.
   const chat = (turn: number): Promise<Turn> =>
@@ -216,11 +220,19 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
       withRetry(
         () => {
           if (stop.aborted) throw new CancelledError();
-          return withWatchdog((activity) => o.provider.chat(messages, PASS_TOOLS, { onStream: () => activity() }), {
+          // Each attempt's request is aborted when the pass stops or the watchdog trips: a provider
+          // that makes an HTTP request cancels it, one that runs a subprocess is closed.
+          const attempt = new AbortController();
+          const abort = () => attempt.abort();
+          stop.addEventListener('abort', abort, { once: true });
+          return withWatchdog((activity) => o.provider.chat(messages, PASS_TOOLS, { onStream: () => activity(), signal: attempt.signal }), {
             idleMs: o.turnTimeoutMs,
             maxMs: o.turnMaxMs ?? 3 * o.turnTimeoutMs,
-            onTimeout: close,
-          });
+            onTimeout: () => {
+              abort();
+              return close();
+            },
+          }).finally(() => stop.removeEventListener('abort', abort));
         },
         {
           baseMs: o.rateLimitBaseMs ?? 5000,
@@ -263,6 +275,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
       messages.push({ role: 'assistant', content: reply.text, ...(reply.toolCalls.length ? { toolCalls: reply.toolCalls } : {}) });
       if (!reply.toolCalls.length) {
         if (++idle >= 3) {
+          ending();
           rec.outcome = 'stalled';
           await checkpoint();
           break;
@@ -295,6 +308,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
                 result += `\nThe call arrived with no arguments. Write it as {"tool": "${call.name}", "args": {${(q.required ?? Object.keys(q.properties)).map((k) => `"${k}": ...`).join(', ')}}}.`;
               }
             } catch (e) {
+              if (stop.aborted) throw new CancelledError();
               result = `Problem: ${(e as Error).message}`;
             }
           }
@@ -306,11 +320,17 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
         if (done) break;
       }
       if (reply.notice) messages.push({ role: 'user', content: reply.notice });
-      if (done) rec.outcome = 'submitted';
+      if (done) {
+        ending();
+        rec.outcome = 'submitted';
+      }
       await checkpoint();
       if (done) break;
     }
-    if (rec.outcome === 'running') rec.outcome = 'turns-exhausted';
+    if (rec.outcome === 'running') {
+      ending();
+      rec.outcome = 'turns-exhausted';
+    }
     // Every ending is saved before the provider is closed (stalled and submitted saved in the loop).
     if (rec.outcome === 'turns-exhausted' || rec.outcome === 'time-exhausted') await checkpoint();
   } catch (e) {
@@ -365,6 +385,7 @@ async function propose(o: PassOptions, args: Record<string, unknown>, held: Map<
       })
       .join('\n');
   } catch (e) {
+    if (signal.aborted) throw new CancelledError();
     return `Held ${ids.length} proposal(s); the pre-check failed: ${(e as Error).message}`;
   }
 }

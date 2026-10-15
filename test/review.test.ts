@@ -1,8 +1,12 @@
-import { mkdir, mkdtemp, readFile, readdir, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { ChatOpts, Msg, Provider, Turn } from '../src/agent/types.js';
+import { AnthropicProvider } from '../src/agent/providers/anthropic.js';
+import { OpenAIProvider } from '../src/agent/providers/openai.js';
 import { parseToolCalls } from '../src/agent/providers/tool-protocol.js';
 import { CancelledError, normalizeProposal, type PassRecord, runPass } from '../src/review/pass.js';
 import { digest, domainTask } from '../src/review/prompts.js';
@@ -305,6 +309,74 @@ describe('review: one pass', () => {
     expect(rec.proposals).toEqual([]);
     expect(tools.calls).toEqual([]);
   });
+
+  it('records a cancellation that lands during a query as one, not as the submit after it', async () => {
+    const cancel = new AbortController();
+    const tools: ToolsClient = {
+      command: ['fake-tools'],
+      async run() {
+        cancel.abort();
+        throw new Error('copperhead-tools review-query: cancelled');
+      },
+    };
+    const rec = await runPass({
+      domain: 'P', model: 's', tools, bundlePath: 'b', system: 's', task: 't', maxTurns: 1, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined, signal: cancel.signal,
+      provider: scriptedProvider([{ toolCalls: [{ name: 'nets', args: {} }, { name: 'submit', args: {} }] }]),
+    });
+    expect(rec).toMatchObject({ outcome: 'failed', error: 'cancelled' });
+  });
+
+  it('aborts the provider request when the pass stops', async () => {
+    let aborted = false;
+    const listening: Provider = {
+      name: 'http-like',
+      chat: (_m: Msg[], _t, opts?: ChatOpts) =>
+        new Promise<Turn>((_, reject) => {
+          opts?.signal?.addEventListener('abort', () => {
+            aborted = true;
+            reject(new Error('request aborted'));
+          });
+        }),
+    };
+    const rec = await runPass({ domain: 'P', model: 's', provider: listening, tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 3, maxSeconds: 0.2, turnTimeoutMs: 10_000, log: () => undefined });
+    expect(rec.outcome).toBe('time-exhausted');
+    expect(aborted).toBe(true);
+  });
+});
+
+describe('review: providers that make an HTTP request', () => {
+  /** A server that never answers, and reports when a client gives up on it. */
+  async function silentServer(): Promise<{ url: string; closed: Promise<void>; stop: () => Promise<void> }> {
+    let onClose!: () => void;
+    const closed = new Promise<void>((r) => (onClose = r));
+    const server = http.createServer((req) => req.on('close', onClose));
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const { port } = server.address() as AddressInfo;
+    return { url: `http://127.0.0.1:${port}`, closed, stop: () => new Promise<void>((r) => server.close(() => r())) };
+  }
+
+  it('cancels the request when the turn signal aborts', async () => {
+    for (const make of [
+      (url: string) => new OpenAIProvider('gpt-5', { baseURL: `${url}/v1`, apiKeyEnv: 'REVIEW_TEST_KEY' }, { REVIEW_TEST_KEY: 'sk-test' }),
+      // The Anthropic SDK reads its endpoint from ANTHROPIC_BASE_URL, set below for each server.
+      () => new AnthropicProvider('claude-sonnet-5', 'sk-ant-test'),
+    ]) {
+      const server = await silentServer();
+      const previous = process.env.ANTHROPIC_BASE_URL;
+      process.env.ANTHROPIC_BASE_URL = server.url;
+      try {
+        const turn = new AbortController();
+        const pending = make(server.url).chat([{ role: 'user', content: 'hi' }], [], { signal: turn.signal });
+        setTimeout(() => turn.abort(), 100);
+        await expect(pending).rejects.toThrow();
+        await server.closed;
+      } finally {
+        if (previous === undefined) delete process.env.ANTHROPIC_BASE_URL;
+        else process.env.ANTHROPIC_BASE_URL = previous;
+        await server.stop();
+      }
+    }
+  }, 30_000);
 });
 
 describe('review: the run and its record', () => {
@@ -493,6 +565,24 @@ describe('review: the run and its record', () => {
     expect(made).toBe(3);
     expect(lines.filter((l) => l.includes('rerunning'))).toEqual(Array(3).fill('[P] resume: rerunning the pass, which ran with another model, prompt or budget'));
     await expect(runReview({ ...base, out: path.join(root, 'none'), domains: [], model: 's', maxTurns: 5, makeProvider: async () => submitter(), log: () => undefined })).rejects.toThrow(/--domains names no domain/);
+  }, 30_000);
+
+  it('resumes only a record that names the same inputs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const design = path.join(root, 'design');
+    await mkdir(design);
+    await mkdir(path.join(root, 'docs'));
+    const out = path.join(root, 'record');
+    const submitter = () => scriptedProvider([{ toolCalls: [{ name: 'submit', args: {} }] }]);
+    const base = { cwd: root, design: 'design', out: 'record', sources: [], model: 's', domains: ['P'], maxTurns: 5, maxMinutes: 5, parallel: 1, client: fakeTools(), makeProvider: async () => submitter(), log: () => undefined };
+    await runReview(base);
+    expect(JSON.parse(await readFile(path.join(out, 'inputs.json'), 'utf8'))).toEqual({ design: 'design', sources: [], fab: [], fabProfile: null, sweep: null, label: null });
+    await runReview({ ...base, resume: true });
+    await expect(runReview({ ...base, resume: true, sources: ['docs'] })).rejects.toThrow(/--resume must name the record's inputs/);
+    await mkdir(path.join(root, 'other-board'));
+    await expect(runReview({ ...base, resume: true, design: 'other-board' })).rejects.toThrow(/--resume must name the record's inputs/);
+    await unlink(path.join(out, 'inputs.json'));
+    await expect(runReview({ ...base, resume: true })).rejects.toThrow(/no readable inputs\.json/);
   }, 30_000);
 
   it('reports a cancellation that lands during the last copperhead-tools call as one', async () => {

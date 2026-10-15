@@ -182,6 +182,26 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   // A bundle a killed run left half-written is rebuilt; no pass can have read it.
   const resumable = o.resume && (await parses(path.join(out, 'bundle.json')));
   if (o.resume && !resumable) log('resume: no bundle in the record; starting from the sweep');
+  // What the record reviews, as this run names it. A resumed run must name the same: the bundle and
+  // every kept pass were made from these inputs, and the lockfile it writes names them.
+  const inputs = {
+    design: shown(design),
+    sources: o.sources.map((p) => shown(abs(p))),
+    fab: fab.map(shown),
+    fabProfile: o.fabProfile ? shown(abs(o.fabProfile)) : null,
+    sweep: o.sweep ? shown(abs(o.sweep)) : null,
+    label: o.label ?? null,
+  };
+  const inputsPath = path.join(out, 'inputs.json');
+  if (resumable) {
+    let was: unknown = null;
+    try {
+      was = JSON.parse(await readFile(inputsPath, 'utf8'));
+    } catch {
+      throw new Error(`--resume: the record has no readable inputs.json, so its inputs cannot be checked; start a new record`);
+    }
+    if (JSON.stringify(was) !== JSON.stringify(inputs)) throw new Error(`--resume must name the record's inputs, from the directory its review ran in: the record has ${JSON.stringify(was)}, this run names ${JSON.stringify(inputs)}`);
+  } else await writeAtomic(inputsPath, `${JSON.stringify(inputs, null, 1)}\n`);
 
   // 1. sweep
   let sweepDir: string;

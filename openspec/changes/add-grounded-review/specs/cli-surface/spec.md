@@ -37,11 +37,15 @@ A text-protocol tool call SHALL take its arguments from `args`, else from `argum
 - **THEN** no call runs, and the nudge names `board`, the `<invoke>` block and `{"tool": "board", "args": { ... }}`
 
 ### Requirement: Resuming a killed run
-`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled) under the same model, prompt templates, budgets and bundle as the resumed run, keep any other sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt.
+`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled) under the same model, prompt templates, budgets and bundle as the resumed run, keep any other sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt. The record SHALL hold `inputs.json`, the design, sources, fabrication inputs, profile, sweep and label as the run named them from its working directory, and a resume that names other inputs, or whose record has no readable `inputs.json`, SHALL be refused before anything runs.
 
 #### Scenario: One pass failed
 - **WHEN** a record holds seven submitted passes and one that failed, and `--resume` is run
 - **THEN** only the failed domain's pass runs, and the bundle is not rebuilt
+
+#### Scenario: Resumed with another design
+- **WHEN** a record was made with `review ./board --out record` and `review --resume --out record` is run, which names the working directory as the design
+- **THEN** it exits 1 naming the record's inputs and the ones given, and runs nothing
 
 #### Scenario: Resumed with another model
 - **WHEN** `--resume` is run with a `--model` other than the one a submitted pass ran with
