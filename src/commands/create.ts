@@ -226,6 +226,11 @@ export const STAGES: Stage[] = [
       // the stage active on the next resume so partial capture continues.
       if (!(await listSymbols(p)).length) return false;
       if ((await checkDrift(root, config.docs, config.schematic)).length !== 0) return false;
+      // The stage may change a part's footprint (the draft engine names the
+      // variant whose pads match the symbol), and drift only compares the
+      // schematic with BOM.md: an installed id retyped with a slip in both
+      // would reach layout-draft, where it stops the run for the user.
+      if ((await bomFootprintMisses(root, config.docs))?.missing.some(retypedId)) return false;
       // ERC-clean is part of "done" (F2 / verification-gated-out on the resume
       // path). Symbols + drift-clean can still hold on a schematic with
       // unconnected pins — e.g. a run hard-killed mid-capture after BOM/PINOUT
@@ -434,6 +439,19 @@ async function bomFootprintMisses(
  * simply not installed is the user's to install, and stops the run; the
  * ranked guesses a miss may carry (`fuzzy`) are shown there, not acted on.
  */
+/**
+ * A miss that is an installed id retyped with a slip of separator or case
+ * (`…USB4125-xx-x_0190…` for `…USB4125-xx-x-0190…`): an installed id it offers
+ * is the same once those are set aside. The schematic stage holds only these:
+ * it may change a footprint, and a slip there would reach layout-draft and stop
+ * the run for the user. Anything else, a different part one character away
+ * (ESP32-S3 for ESP32-S2) or a footprint never installed, is left to that stop,
+ * as before.
+ */
+const canonFootprint = (id: string): string => id.toLowerCase().replace(/[-_.\s]/g, '');
+const retypedId = (m: MissingFootprint): boolean =>
+  !!m.footprint && m.near.some((id) => canonFootprint(id) === canonFootprint(m.footprint));
+
 const modelFixable = (m: MissingFootprint): boolean => !!m.symbol || m.why !== 'no-library' || (m.near.length > 0 && !m.fuzzy);
 
 async function bomFootprintStop(root: string, config: CopperheadConfig): Promise<string | null> {
@@ -506,23 +524,34 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   );
 }
 
+/** The footprint misses a stage's model can fix, listed for its retry. */
+function footprintMissDetail(fixable: MissingFootprint[]): string {
+  return (
+    `${fixable.length} BOM.md footprint(s) do not resolve to an installed footprint — ` +
+    fixable
+      .map(
+        (m) =>
+          `${m.ref} ${m.footprint || '(none)'}${m.symbol ? ' is a symbol id, not a footprint id' : ''}` +
+          (m.near.length ? ` (${m.symbol ? 'footprints it accepts' : 'installed'}: ${m.near.slice(0, 3).join(', ')})` : ''),
+      )
+      .join('; ') +
+    '; call check_footprints on every Footprint cell and use exact installed ids'
+  );
+}
+
 async function contractGapDetail(stageName: string, root: string, config: CopperheadConfig): Promise<string> {
   const generic = 'the run finished but the stage completion contract is not met — no usable artifact was produced';
   if (stageName === 'part-selection') {
     const r = await bomFootprintMisses(root, config.docs);
     const fixable = r?.missing.filter(modelFixable) ?? [];
     if (fixable.length) {
-      return (
-        `the part-selection contract is not met: ${fixable.length} BOM.md footprint(s) do not resolve to an installed footprint — ` +
-        fixable
-          .map(
-            (m) =>
-              `${m.ref} ${m.footprint || '(none)'}${m.symbol ? ' is a symbol id, not a footprint id' : ''}` +
-              (m.near.length ? ` (${m.symbol ? 'footprints it accepts' : 'installed'}: ${m.near.slice(0, 3).join(', ')})` : ''),
-          )
-          .join('; ') +
-        '; call check_footprints on every Footprint cell and use exact installed ids'
-      );
+      return `the part-selection contract is not met: ${footprintMissDetail(fixable)}`;
+    }
+  }
+  if (stageName === 'schematic') {
+    const fixable = (await bomFootprintMisses(root, config.docs))?.missing.filter(retypedId) ?? [];
+    if (fixable.length) {
+      return `the schematic contract is not met: ${footprintMissDetail(fixable)}, in BOM.md and the schematic's Footprint fields alike`;
     }
   }
   if (stageName === 'layout-draft') {
