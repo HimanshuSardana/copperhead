@@ -299,6 +299,17 @@ describe('exact footprint resolution (AC-15.29, AC-15.30, AC-15.33)', () => {
     expect(msg).not.toContain('(name "Device")');
   });
 
+  it("a symbol's own footprints with a pad for every pin, for a part drawn on a package that lacks some", async () => {
+    const r = await FootprintResolver.create({ projectDir: emptyConfig, env: hermetic(), global: false });
+    // the platform run's U1: a TPS62162DSG (8 pins and its exposed pad, 9) on a SOT-23-6
+    const pins = new Set(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+    const own = await r.symbolFootprintsCovering('Regulator_Switching:TPS62162DSG', pins);
+    expect(own[0]).toBe('Package_SON:WSON-8-1EP_2x2mm_P0.5mm_EP0.9x1.6mm_ThermalVias');
+    expect(own).not.toContain('Package_TO_SOT_SMD:SOT-23-6');
+    // a lib_id that names no installed symbol offers nothing
+    expect(await r.symbolFootprintsCovering('Nowhere:Nothing', pins)).toEqual([]);
+  });
+
   it('the stop message names every part, the fix, and no absolute path', async () => {
     const r = await FootprintResolver.create({ projectDir: emptyConfig, env: hermetic(), global: false });
     const missing = await missingFootprints(

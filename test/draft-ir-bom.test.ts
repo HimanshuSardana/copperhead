@@ -237,6 +237,10 @@ describe('footprint cross-check (#314, AC-15.34)', () => {
       expect(res.findings.map((f) => f.detail).join('\n')).toContain(
         'C1: pin(s) 2 have no pad in footprint TestPoint:TestPoint_Pad_D1.0mm (its pads: 1)',
       );
+      // the way out on the footprint's side too: the symbol's own footprints with a pad for every pin
+      expect(res.findings.map((f) => f.detail).join('\n')).toContain(
+        "use a footprint with a pad for every pin of the symbol (the symbol's own footprints that do: Capacitor_SMD:C_",
+      );
       // without a resolver (standalone drafts, the reference corpus) the check does not run
       expect((await validateIntent(intent!, new SymbolSource(repo, [SYMLIB]), docs)).ok).toBe(true);
     } finally {

@@ -304,27 +304,57 @@ export class FootprintResolver {
    * names no installed symbol.
    */
   private async symbolMiss(fpId: string, why: FootprintMiss): Promise<FootprintLookup | null> {
-    let pending = this.symbolHints.get(fpId);
+    const near = await this.symbolAccepts(fpId);
+    return near ? { ok: false, why, near: near.slice(0, 5), symbol: true } : null;
+  }
+
+  /**
+   * The installed footprints a symbol accepts, best first: its own Footprint
+   * property, then what its `ki_fp_filters` match, nearest its name first.
+   * Null when `libId` names no installed symbol.
+   */
+  private async symbolAccepts(libId: string): Promise<string[] | null> {
+    let pending = this.symbolHints.get(libId);
     if (!pending) {
-      pending = symbolFootprintHints(fpId, this.symbolDirs).catch(() => null);
-      this.symbolHints.set(fpId, pending);
+      pending = symbolFootprintHints(libId, this.symbolDirs).catch(() => null);
+      this.symbolHints.set(libId, pending);
     }
     const hints = await pending;
     if (!hints) return null;
-    const near: string[] = [];
-    if (hints.footprint && (await this.lookup(hints.footprint)).ok) near.push(hints.footprint);
+    const out: string[] = [];
+    if (hints.footprint && (await this.lookup(hints.footprint)).ok) out.push(hints.footprint);
     if (hints.filters.length) {
       const filters = hints.filters.map(fpFilter);
       const matched: string[] = [];
       for (const [name, libs] of await this.installed()) {
         for (const lib of libs) if (filters.some((f) => f(lib, name))) matched.push(`${lib}:${name}`);
       }
-      for (const id of rankBySymbolName(matched, fpId.slice(fpId.indexOf(':') + 1))) {
-        if (near.length >= 5) break;
-        if (!near.includes(id)) near.push(id);
-      }
+      for (const id of rankBySymbolName(matched, libId.slice(libId.indexOf(':') + 1))) if (!out.includes(id)) out.push(id);
     }
-    return { ok: false, why, near, symbol: true };
+    return out;
+  }
+
+  /**
+   * Footprints the symbol accepts that have a pad for every one of its pins, at
+   * most `cap`: what a part can change to when its footprint lacks pads for
+   * some pins and that footprint's library ships no variant that fits (a
+   * TPS62162DSG, whose own footprint is a WSON-8 with its exposed pad, drawn on
+   * a SOT-23-6). Only the first candidates are read, since each is a file.
+   */
+  async symbolFootprintsCovering(libId: string, symbolPins: ReadonlySet<string>, cap = 3): Promise<string[]> {
+    const out: string[] = [];
+    for (const id of ((await this.symbolAccepts(libId)) ?? []).slice(0, 24)) {
+      const hit = await this.lookup(id);
+      if (!hit.ok) continue;
+      try {
+        const { numbers } = await readFootprintPads(hit.file);
+        if ([...symbolPins].every((n) => numbers.has(n))) out.push(id);
+      } catch {
+        // unreadable or malformed: not a candidate
+      }
+      if (out.length >= cap) break;
+    }
+    return out;
   }
 
   private async lookup(fpId: string): Promise<FootprintLookup> {
