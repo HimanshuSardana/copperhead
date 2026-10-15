@@ -505,27 +505,6 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   );
 }
 
-/**
- * The guidance for another schematic attempt when the last one refused while
- * draft_schematic still listed findings, or null. Those findings are the
- * stage's own work, each naming its fix, and hosted models refuse over them
- * when they pile up (a platform run on gpt-5.6-sol refused twice over a
- * footprint the finding named, and the diagnosis stopped the run). So the
- * refusal is answered in code, within the same attempt limit, rather than by
- * the diagnosis model. It also says what the Footprint column holds, the
- * confusion behind several of those findings.
- */
-export function refusalOverFindings(stageName: string, outcome: string, lastDraft: string | null): string | null {
-  if (stageName !== 'schematic' || outcome !== 'refused' || !lastDraft || !/^intent validation: \d+ finding/.test(lastDraft)) return null;
-  return (
-    `The previous attempt refused while draft_schematic still listed ${lastDraft.replace(/^intent validation: /, '').replace(/:$/, '')}. ` +
-    'Those findings are this stage\'s work, not a reason to stop: each one names its fix. Where a finding says to change the footprint, ' +
-    'change it in BOM.md and the intent together, to the footprint it names; where it says to change the symbol, change the libId in the intent. ' +
-    "BOM.md's Footprint column holds a footprint id (a Lib:Name that check_footprints reports OK), never a symbol lib_id such as Connector:TestPoint. " +
-    'Then call draft_schematic again, and refuse only over what no edit to BOM.md or the intent can fix.'
-  );
-}
-
 async function contractGapDetail(stageName: string, root: string, config: CopperheadConfig): Promise<string> {
   const generic = 'the run finished but the stage completion contract is not met — no usable artifact was produced';
   if (stageName === 'part-selection') {
@@ -677,6 +656,27 @@ async function renderStageArtifacts(opts: CreateOptions, stageName: string, tran
       ),
     );
   }
+}
+
+/**
+ * The guidance for another schematic attempt when the last one refused while
+ * draft_schematic still listed findings, or null. Those findings are the
+ * stage's own work, each naming its fix, and hosted models refuse over them
+ * when they pile up (a platform run on gpt-5.6-sol refused twice over a
+ * footprint the finding named, and the diagnosis stopped the run). So the
+ * refusal is answered in code, within the same attempt limit, rather than by
+ * the diagnosis model. It also says what the Footprint column holds, the
+ * confusion behind several of those findings.
+ */
+export function refusalOverFindings(stageName: string, outcome: string, lastDraft: string | null): string | null {
+  if (stageName !== 'schematic' || outcome !== 'refused' || !lastDraft || !/^intent validation: \d+ finding/.test(lastDraft)) return null;
+  return (
+    `The previous attempt refused while draft_schematic still listed ${lastDraft.replace(/^intent validation: /, '').replace(/:$/, '')}. ` +
+    'Those findings are this stage\'s work, not a reason to stop: each one names its fix. Where a finding says to change the footprint, ' +
+    'change it in BOM.md and the intent together, to the footprint it names; where it says to change the symbol, change the libId in the intent. ' +
+    "BOM.md's Footprint column holds a footprint id (a Lib:Name that check_footprints reports OK), never a symbol lib_id such as Connector:TestPoint. " +
+    'Then call draft_schematic again, and refuse only over what no edit to BOM.md or the intent can fix.'
+  );
 }
 
 /**
