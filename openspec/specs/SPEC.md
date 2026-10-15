@@ -328,7 +328,10 @@ copperhead review [design] --out <dir> [--source …] [--fab …] [--fab-profile
     questions); copperhead-tools' verifiers decide each one, and the report is
     rendered from what they decided. Never writes the design. `--replay <dir>`
     re-verifies a record's stored proposals with no model and must reproduce
-    its report byte for byte; `--resume` continues a record a killed run left.
+    its report byte for byte; `--resume` continues a record a killed or
+    cancelled run left. Exits 0, or 2 when the report was written but a pass
+    failed; 1 on an error or a replay that differs; 130 or 143 when cancelled
+    by SIGINT or SIGTERM.
 
 copperhead explain <refdes|net|pin>       # stretch
     Answer "why is R7 here?" from docs + schematic context.

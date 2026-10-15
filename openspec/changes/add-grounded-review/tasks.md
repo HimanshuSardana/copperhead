@@ -24,3 +24,14 @@
 - [x] 4.2 Text tool protocol reads `arguments`, `parameters`, `input` and flat arguments; protocol tests
 - [x] 4.3 SPEC.md section 3 gains the `review` command
 - [x] 4.4 Run typecheck, the test suite, the build and `openspec validate add-grounded-review --strict`
+
+## 5. Review fixes (PR #361)
+
+- [x] 5.1 Redact pass summaries in `model/passes.json` and the progress lines; an `sk-` run glued to a word is a key only when long and holding a digit, so "mask-defined" quotations survive redaction verbatim
+- [x] 5.2 Check `--out` against the design and every `--source` and `--fab` input through symbolic links
+- [x] 5.3 Save the sample after a turn with no tool call and after a timed-out turn; write samples atomically; rerun a pass whose sample does not parse
+- [x] 5.4 Refuse budgets that are not positive numbers before writing anything
+- [x] 5.5 Inactivity watchdog and rate-limit backoff for pass turns; a specific nudge for a call written as an `<invoke>` block
+- [x] 5.6 SIGINT and SIGTERM cancel the run and stop its subprocesses; exit codes 0, 2, 1, 130 and 143
+- [x] 5.7 Lockfile paths relative to the working directory; replay checks the bundle's hash; a pass whose provider cannot start writes its sample and its `pass ends` line
+- [x] 5.8 Tests for each, failing before the fix; a live one-domain run, its cancel, resume and byte-identical replay
