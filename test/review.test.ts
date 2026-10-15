@@ -325,6 +325,9 @@ describe('review: one pass', () => {
       provider: scriptedProvider([{ toolCalls: [{ name: 'nets', args: {} }, { name: 'submit', args: {} }] }]),
     });
     expect(rec).toMatchObject({ outcome: 'failed', error: 'cancelled' });
+    // The call the stop cut short is in the call log and the transcript; the submit after it never ran.
+    expect(rec.calls.map((c) => [c.tool, c.result.slice(0, 8)])).toEqual([['nets', 'Stopped:']]);
+    expect(rec.transcript.at(-1)).toMatchObject({ role: 'tool', content: expect.stringMatching(/^Stopped:/) });
   });
 
   it('aborts the provider request when the pass stops', async () => {
@@ -497,6 +500,13 @@ describe('review: the run and its record', () => {
     tools.calls.length = 0;
     expect((await replayReview('reviews/r1', { cwd: root, log: () => undefined, client: tools })).identical).toBe(true);
     expect(tools.calls.map((c) => [c.tool, c.cwd])).toEqual([['review-verify', root]]);
+    // A replay writes replay/ beneath the record, so a record inside what it reviewed is refused.
+    await mkdir(path.join(root, 'board', 'r1-copy'), { recursive: true });
+    for (const f of ['review.lock.json', 'inputs.json', 'bundle.json', 'report.md']) await writeFile(path.join(root, 'board', 'r1-copy', f), await readFile(path.join(record, f)));
+    await mkdir(path.join(root, 'board', 'r1-copy', 'model'));
+    await writeFile(path.join(root, 'board', 'r1-copy', 'model', 'proposals.json'), await readFile(path.join(record, 'model', 'proposals.json')));
+    await expect(replayReview('board/r1-copy', { cwd: root, log: () => undefined, client: tools })).rejects.toThrow(/inside board, which the review read/);
+    expect(await readdir(path.join(root, 'board', 'r1-copy'))).not.toContain('replay');
     // The bundle is pinned by the lockfile too.
     await writeFile(path.join(record, 'bundle.json'), '{}');
     await expect(replayReview(record, { log: () => undefined, client: tools })).rejects.toThrow(/bundle\.json differs from the lockfile/);

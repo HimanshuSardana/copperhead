@@ -288,35 +288,45 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
       let done = false;
       for (const call of reply.toolCalls) {
         const t0 = Date.now();
-        let result: string;
-        if (call.name === 'submit') {
-          rec.summary = typeof call.args.summary === 'string' ? call.args.summary : null;
-          result = `Submitted ${proposals.size} proposal(s).`;
-          done = true;
-        } else if (call.name === 'propose') {
-          result = await propose(o, call.args, proposals, scratch, stop);
-        } else {
-          const q = QUERIES.find((x) => x.name === call.name);
-          if (!q) result = `Unknown tool ${call.name}.`;
-          else {
-            const args = { ...call.args, ...(q.preset ?? {}) };
-            try {
-              const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) }, { signal: stop });
-              const d = r.data as { ok?: boolean; text?: string; problem?: string } | undefined;
-              result = d?.ok ? (d.text ?? '') : `Problem: ${d?.problem ?? 'no result'}`;
-              if (!d?.ok && !Object.keys(call.args).length && (q.required ?? []).length) {
-                result += `\nThe call arrived with no arguments. Write it as {"tool": "${call.name}", "args": {${(q.required ?? Object.keys(q.properties)).map((k) => `"${k}": ...`).join(', ')}}}.`;
+        let result = '';
+        // A call the stop cut short is recorded like any other, with what happened, before the
+        // pass ends: the call log holds every call.
+        let stopped: CancelledError | null = null;
+        try {
+          if (call.name === 'submit') {
+            rec.summary = typeof call.args.summary === 'string' ? call.args.summary : null;
+            result = `Submitted ${proposals.size} proposal(s).`;
+            done = true;
+          } else if (call.name === 'propose') {
+            result = await propose(o, call.args, proposals, scratch, stop);
+          } else {
+            const q = QUERIES.find((x) => x.name === call.name);
+            if (!q) result = `Unknown tool ${call.name}.`;
+            else {
+              const args = { ...call.args, ...(q.preset ?? {}) };
+              try {
+                const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) }, { signal: stop });
+                const d = r.data as { ok?: boolean; text?: string; problem?: string } | undefined;
+                result = d?.ok ? (d.text ?? '') : `Problem: ${d?.problem ?? 'no result'}`;
+                if (!d?.ok && !Object.keys(call.args).length && (q.required ?? []).length) {
+                  result += `\nThe call arrived with no arguments. Write it as {"tool": "${call.name}", "args": {${(q.required ?? Object.keys(q.properties)).map((k) => `"${k}": ...`).join(', ')}}}.`;
+                }
+              } catch (e) {
+                if (stop.aborted) throw new CancelledError();
+                result = `Problem: ${(e as Error).message}`;
               }
-            } catch (e) {
-              if (stop.aborted) throw new CancelledError();
-              result = `Problem: ${(e as Error).message}`;
             }
           }
+        } catch (e) {
+          if (!(e instanceof CancelledError)) throw e;
+          stopped = e;
+          result = 'Stopped: the pass was cancelled or ran out of its time budget before this call finished.';
         }
         result = clip(result);
         rec.calls.push({ turn, tool: call.name, args: call.args, result, ms: Date.now() - t0 });
         messages.push({ role: 'tool', toolCallId: call.id, content: result });
         o.log(`[${o.domain}] turn ${turn}: ${call.name} ${call.name === 'propose' ? `(${proposals.size} held)` : JSON.stringify(call.args).slice(0, 90)}`);
+        if (stopped) throw stopped;
         if (done) break;
       }
       if (reply.notice) messages.push({ role: 'user', content: reply.notice });

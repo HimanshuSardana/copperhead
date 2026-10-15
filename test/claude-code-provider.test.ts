@@ -412,6 +412,27 @@ describe('ClaudeCodeProvider — session resume (1.1)', () => {
     expect(seen[1]!.prompt).not.toContain('[assistant tool call]'); // our own reply isn't re-sent
   });
 
+  it('starts a new session after close(), so a retried turn cannot duplicate a torn-down turn', async () => {
+    const seen: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
+    const q: QueryLike = (args) => {
+      seen.push(args);
+      return (async function* () {
+        for (const m of withSession('sess-123', [assistant('ok'), result()])) yield m;
+      })();
+    };
+    const provider = new ClaudeCodeProvider(undefined, q, undefined, true);
+    const first: Msg[] = [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'do it' },
+    ];
+    await provider.chat(first, tools);
+    // The watchdog closes the provider on a hung turn, then the turn is retried.
+    await provider.close();
+    await provider.chat([...first, { role: 'assistant', content: 'ok' }, { role: 'user', content: 'next' }], tools);
+    expect((seen[1]!.options ?? {}).resume).toBeUndefined();
+    expect(seen[1]!.prompt).toContain('do it'); // the whole conversation, in a new session
+  });
+
   it('is off by default: every turn re-sends the full flattened history, never resume', async () => {
     const seen: Array<{ prompt: string; options?: Record<string, unknown> }> = [];
     const q: QueryLike = (args) => {

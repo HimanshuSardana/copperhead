@@ -42,3 +42,4 @@
 - [x] 5.13 Fifth Codex review: the resume input check does not depend on the bundle, and `--resume` refuses a directory that is not a record; review passes get a `compat:<id>` model's endpoint settings
 - [x] 5.14 Sixth Codex review: `--resume` and `--replay` refuse a record holding a symbolic link
 - [x] 5.15 Seventh Codex review: `--out` must lie outside a reused `--sweep`; a resumed or replayed record holding a hard-linked file is refused
+- [x] 5.16 Eighth Codex review: replay refuses a record inside an input it names; claude-code and cursor start a new session after close(); a call the stop cut short is recorded

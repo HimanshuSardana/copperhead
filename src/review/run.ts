@@ -406,6 +406,14 @@ export async function replayReview(record: string, o: ReplayOptions): Promise<{ 
   if (sha256(await readFile(bundlePath, 'utf8')) !== lock.bundle.sha256) throw new Error('bundle.json differs from the lockfile: the bundle was changed');
   if (sha256(await readFile(proposalsPath, 'utf8')) !== lock.proposals.sha256) throw new Error('model/proposals.json differs from the lockfile: the stored samples were changed');
   const replayDir = path.join(dir, 'replay');
+  // Replay writes replay/ beneath the record, so the record must lie outside what it reviewed, as
+  // runReview requires of --out: the inputs as the record names them, from the directory it ran in.
+  const named = await readFile(path.join(dir, 'inputs.json'), 'utf8').then((t) => JSON.parse(t) as { design: string; sources: string[]; fab: string[]; sweep: string | null }).catch(() => null);
+  const reviewed = named ? [named.design, ...named.sources, ...named.fab, ...(named.sweep ? [named.sweep] : [])] : [(lock as { design?: string }).design ?? ''].filter(Boolean);
+  const realReplay = await canonical(replayDir);
+  for (const input of reviewed) {
+    if (within(realReplay, await canonical(path.resolve(cwd, input)))) throw new Error(`--replay writes ${replayDir}, inside ${input}, which the review read and never writes; replay a copy of the record kept outside it`);
+  }
   await mkdir(replayDir, { recursive: true });
   log('replay: re-verifying the stored samples (no model)');
   await verify(tools, bundlePath, proposalsPath, replayDir, signal);
