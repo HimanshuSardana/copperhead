@@ -97,3 +97,11 @@
 - [x] 13.2 Populate remaps every object id inside a placed footprint per instance, deterministically; test: two instances of a stock footprint with nested ids share none, and DRC reports no mismatch
 - [x] 13.3 The missing-footprint stop runs before the KiCad project is scaffolded, so it writes no KiCad file; test asserts no scaffold files after the stop
 - [x] 13.4 SPEC.md AC-15.31/32/36, delta specs, design D1/D7
+
+## 14. Review of the unreleased main (post-0.11)
+
+- [x] 14.1 Layout-draft completion needs something written under Draft quality: the placeholder `copperhead init` scaffolds no longer passes now that populate fills the board before the first turn; the gate reads the document first, then the netlist, then DRC; test: a populated, DRC-clean board with the scaffolded section does not complete
+- [x] 14.2 A DRC finding counts as library-intrinsic only when its items name one annotated reference no other footprint on the board carries; tests: `REF**`, `R?`, and a reference two footprints share
+- [x] 14.3 Populate replaces the net table a footprint-less board kept, and refuses one whose old nets still carry copper; tests for both
+- [x] 14.4 A project library is read before a vendored cache file under its nickname; test: a partial cache file does not shadow the user's library or replace its row
+- [x] 14.5 SPEC.md AC-15.31/37/38/41, delta specs
