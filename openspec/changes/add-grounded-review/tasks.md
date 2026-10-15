@@ -41,3 +41,4 @@
 - [x] 5.12 Fourth Codex review: `inputs.json` records the review's inputs and `--resume` refuses other ones; a query or pre-check cut short by a stop ends the pass cancelled or out of time; a stopped pass aborts its provider request, through a `signal` the OpenAI and Anthropic providers pass to their SDKs
 - [x] 5.13 Fifth Codex review: the resume input check does not depend on the bundle, and `--resume` refuses a directory that is not a record; review passes get a `compat:<id>` model's endpoint settings
 - [x] 5.14 Sixth Codex review: `--resume` and `--replay` refuse a record holding a symbolic link
+- [x] 5.15 Seventh Codex review: `--out` must lie outside a reused `--sweep`; a resumed or replayed record holding a hard-linked file is refused

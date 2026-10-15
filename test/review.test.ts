@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -603,6 +603,15 @@ describe('review: the run and its record', () => {
     await expect(runReview({ ...base, out: 'linked', resume: true })).rejects.toThrow(/holds a symbolic link at model\/samples/);
     await expect(replayReview(linked, { log: () => undefined, client: fakeTools() })).rejects.toThrow(/holds a symbolic link/);
     expect(await readdir(design)).toEqual([]);
+    // A file sharing an input's inode is refused too: writing it would rewrite the input.
+    await runReview({ ...base, out: 'hard' });
+    await writeFile(path.join(design, 'board.kicad_sch'), '(kicad_sch)');
+    await rm(path.join(root, 'hard', 'report.md'));
+    await link(path.join(design, 'board.kicad_sch'), path.join(root, 'hard', 'report.md'));
+    await expect(runReview({ ...base, out: 'hard', resume: true })).rejects.toThrow(/another hard link at report\.md/);
+    await expect(replayReview(path.join(root, 'hard'), { log: () => undefined, client: fakeTools() })).rejects.toThrow(/another hard link/);
+    expect(await readFile(path.join(design, 'board.kicad_sch'), 'utf8')).toBe('(kicad_sch)');
+    await unlink(path.join(design, 'board.kicad_sch'));
     // --resume does not make an unrelated directory a record.
     await mkdir(path.join(root, 'notes'));
     await writeFile(path.join(root, 'notes', 'todo.txt'), 'x');
@@ -664,6 +673,10 @@ describe('review: the run and its record', () => {
     await symlink(design, path.join(root, 'design-link'));
     await expect(runReview({ ...base, design: path.join(root, 'design-link'), out: path.join(design, 'rec') })).rejects.toThrow(/outside the design/);
     await expect(runReview({ ...base, design, out: path.join(root, 'docs', 'rec') })).rejects.toThrow(/outside every input/);
+    await mkdir(path.join(root, 'sweep-record'));
+    await writeFile(path.join(root, 'sweep-record', 'review.json'), '{}');
+    await expect(runReview({ ...base, design, sweep: path.join(root, 'sweep-record'), out: path.join(root, 'sweep-record', 'rec') })).rejects.toThrow(/outside every input/);
+    expect(await readdir(path.join(root, 'sweep-record'))).toEqual(['review.json']);
     expect(await readdir(path.join(design, 'empty'))).toEqual([]);
   });
 });

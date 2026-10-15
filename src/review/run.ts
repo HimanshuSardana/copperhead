@@ -87,9 +87,9 @@ async function emptyOrAbsent(dir: string): Promise<boolean> {
 }
 
 /**
- * Refuse a record that holds a symbolic link anywhere: a review writes only real files under the
- * record, and a linked component (`model/samples` pointing into the design, say) would carry those
- * writes into an input.
+ * Refuse a record that holds a symbolic link, or a file with another hard link, anywhere: a review
+ * writes only its own files under the record, and a linked component (`model/samples` pointing into
+ * the design, say, or a `report.md` sharing an input's inode) would carry those writes into an input.
  */
 async function refuseLinks(dir: string): Promise<void> {
   const walk = async (d: string): Promise<void> => {
@@ -103,6 +103,7 @@ async function refuseLinks(dir: string): Promise<void> {
       const p = path.join(d, name);
       const st = await lstat(p);
       if (st.isSymbolicLink()) throw new Error(`${dir} holds a symbolic link at ${path.relative(dir, p)}; a review record holds none, so nothing is written through it`);
+      if (st.isFile() && st.nlink > 1) throw new Error(`${dir} holds a file with another hard link at ${path.relative(dir, p)}; a review record holds none, so nothing is written through it`);
       if (st.isDirectory()) await walk(p);
     }
   };
@@ -204,7 +205,7 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   // Compared through symbolic links: a link outside the design that points into it is inside it.
   const realOut = await canonical(out);
   if (within(realOut, await canonical(design))) throw new Error('--out must lie outside the design directory: a review never writes into the design');
-  for (const input of [...o.sources.map(abs), ...fab]) {
+  for (const input of [...o.sources.map(abs), ...fab, ...(o.sweep ? [abs(o.sweep)] : [])]) {
     if (within(realOut, await canonical(input))) throw new Error(`--out must lie outside every input; it is inside ${input}`);
   }
   // What the record reviews, as this run names it. A resumed run must name the same: the bundle and
