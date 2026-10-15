@@ -33,7 +33,7 @@ import { openspecInit } from '../openspec/cli.js';
 import { sweepStaleTempDirs, pruneHistoryDir } from '../util/tmp.js';
 import { bomSymbolDossier } from '../kicad/dossier.js';
 import { symbolSearchDirs } from '../kicad/symlib.js';
-import { draftQualitySection, isFilledDraftQuality } from '../kicad/fab.js';
+import { draftQualitySection, isDraftQualityHeading, isFilledDraftQuality } from '../kicad/fab.js';
 import { assertDiskSpace, DEFAULT_MIN_FREE_BYTES } from '../util/preflight.js';
 import { runCheck } from './check.js';
 import { emitCreateJlcpcbBom } from './export.js';
@@ -64,16 +64,19 @@ async function docHasContent(repoRoot: string, rel: string, marker: string): Pro
 /**
  * The layout document's Draft quality section, under a numbered heading or not
  * (#327): 'missing' with no such heading, 'empty' when only comments sit under
- * it (the placeholder `copperhead init` scaffolds), else 'filled'. The same
- * test `check --fab` applies, so the stage never finishes on a section the
- * fab check then calls empty.
+ * it (the placeholder `copperhead init` scaffolds), 'duplicate' when that empty
+ * heading is followed by another, else 'filled'. It reads the first section,
+ * as `check --fab` does, so the stage never finishes on a section the fab
+ * check then calls empty.
  */
-async function draftQualityState(repoRoot: string, rel: string): Promise<'missing' | 'empty' | 'filled'> {
+async function draftQualityState(repoRoot: string, rel: string): Promise<'missing' | 'empty' | 'duplicate' | 'filled'> {
   const p = path.join(repoRoot, rel);
   if (!existsSync(p)) return 'missing';
-  const section = draftQualitySection(await readFile(p, 'utf8'));
+  const text = await readFile(p, 'utf8');
+  const section = draftQualitySection(text);
   if (section === null) return 'missing';
-  return isFilledDraftQuality(section) ? 'filled' : 'empty';
+  if (isFilledDraftQuality(section)) return 'filled';
+  return text.split(/\r?\n/).filter(isDraftQualityHeading).length > 1 ? 'duplicate' : 'empty';
 }
 
 // Heading-aware variant of docHasContent: matches any Markdown heading whose
@@ -493,14 +496,15 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   const layoutDoc = path.posix.join(docs, 'LAYOUT.md');
   const state = await draftQualityState(root, layoutDoc);
   if (state === 'filled') return null;
-  if (state === 'empty') {
-    return `the "## Draft quality" section in ${layoutDoc} is empty: write what is fine, how many connections are still unrouted, and what a human should redo`;
+  if (state === 'duplicate') {
+    return `${layoutDoc} has more than one "## Draft quality" heading and the first is empty: keep one heading, with the assessment under it`;
   }
   const stray = layoutDoc !== 'LAYOUT.md' && (await draftQualityState(root, 'LAYOUT.md')) === 'filled';
-  return (
-    `${layoutDoc} has no "## Draft quality" section` +
-    (stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '')
-  );
+  const where = stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '';
+  if (state === 'empty') {
+    return `the "## Draft quality" section in ${layoutDoc} is empty: write what is fine, how many connections are still unrouted, and what a human should redo${where}`;
+  }
+  return `${layoutDoc} has no "## Draft quality" section${where}`;
 }
 
 /**
@@ -541,15 +545,9 @@ async function contractGapDetail(stageName: string, root: string, config: Copper
     }
   }
   if (stageName === 'layout-draft') {
-    const fresh = await loadConfig(root);
-    const m = await boardMatchesSchematic(root, fresh);
-    if (!m.ok) {
-      return `the layout-draft contract is not met: ${m.detail}; restore the populated footprints (never add or rewrite them) and move them instead`;
-    }
-    const docGap = await layoutDocGap(root, fresh.docs);
-    return docGap
-      ? `the layout-draft contract is not met: ${docGap}`
-      : 'the layout-draft contract is not met: the board does not pass DRC; run run_drc and fix what it reports before finishing';
+    // the same gap, in the same order, that finish was told
+    const gap = await layoutDraftGap(root, (await loadConfig(root)).docs);
+    return gap ? `the layout-draft contract is not met: ${gap}` : generic;
   }
   if (stageName !== 'schematic' || !config.schematic) return generic;
   const p = path.join(root, config.schematic);

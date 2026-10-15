@@ -427,7 +427,69 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         stripped.slice(close);
       await writeFile(board, stripped, 'utf8');
       await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
-        /no footprints but still declares \d+ net\(s\), with 1 track\(s\), via\(s\) or zone\(s\) on them/,
+        /no footprints but still declares \d+ net\(s\), with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on them/,
+      );
+      expect(await readFile(board, 'utf8')).toBe(stripped);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('removes a stale net that shares a line, and keeps a keepout zone that is on no net', async () => {
+    const { repo, cleanup } = await draftedProject();
+    try {
+      await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
+      const board = path.join(repo, PCB);
+      const populated = await readFile(board, 'utf8');
+      const open = populated.indexOf('(kicad_pcb');
+      let stripped = populated;
+      for (const sp of childSpans(populated, open).filter((x) => x.tag === 'footprint').reverse()) {
+        stripped = stripped.slice(0, sp.start) + stripped.slice(sp.end);
+      }
+      // an old net hand-edited onto the net 0 line, renamed since
+      const net1 = /\n\t\(net 1 "[^"]*"\)/.exec(stripped)!;
+      stripped = stripped.slice(0, net1.index) + stripped.slice(net1.index + net1[0].length);
+      stripped = stripped.replace('(net 0 "")', '(net 0 "") (net 1 "A_MUCH_LONGER_OLD_NAME")');
+      const keepout =
+        '\t(zone (net 0) (net_name "") (layers "F.Cu") (uuid "6f1a3c1e-0000-4000-8000-000000000002") (hatch edge 0.5)' +
+        ' (connect_pads (clearance 0)) (min_thickness 0.25)' +
+        ' (keepout (tracks not_allowed) (vias not_allowed) (pads allowed) (copperpour not_allowed) (footprints allowed))' +
+        ' (fill (thermal_gap 0.5) (thermal_bridge_width 0.5)) (polygon (pts (xy 1 1) (xy 5 1) (xy 5 5) (xy 1 5))))\n';
+      const close = stripped.lastIndexOf(')');
+      await writeFile(board, stripped.slice(0, close) + keepout + stripped.slice(close), 'utf8');
+      await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
+      const again = await readFile(board, 'utf8');
+      const tops = childSpans(again, again.indexOf('(kicad_pcb'));
+      const nets = tops.filter((x) => x.tag === 'net').map((x) => again.slice(x.start, x.end));
+      const fresh = childSpans(populated, open).filter((x) => x.tag === 'net').map((x) => populated.slice(x.start, x.end));
+      expect(nets).toEqual(fresh);
+      expect(again).not.toContain('A_MUCH_LONGER_OLD_NAME');
+      expect(tops.filter((x) => x.tag === 'zone')).toHaveLength(1);
+      expect(await kicadLoadError(board)).toBeNull();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('refuses a footprint-less board with a copper shape still on an old net', async () => {
+    const { repo, cleanup } = await draftedProject();
+    try {
+      await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
+      const board = path.join(repo, PCB);
+      const populated = await readFile(board, 'utf8');
+      const open = populated.indexOf('(kicad_pcb');
+      let stripped = populated;
+      for (const sp of childSpans(populated, open).filter((x) => x.tag === 'footprint').reverse()) {
+        stripped = stripped.slice(0, sp.start) + stripped.slice(sp.end);
+      }
+      const close = stripped.lastIndexOf(')');
+      stripped =
+        stripped.slice(0, close) +
+        '\t(gr_poly (pts (xy 1 1) (xy 5 1) (xy 5 5)) (stroke (width 0) (type solid)) (fill yes) (layer "F.Cu") (net 2) (uuid "6f1a3c1e-0000-4000-8000-000000000003"))\n' +
+        stripped.slice(close);
+      await writeFile(board, stripped, 'utf8');
+      await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
+        /with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on them/,
       );
       expect(await readFile(board, 'utf8')).toBe(stripped);
     } finally {

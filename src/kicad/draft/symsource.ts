@@ -5,6 +5,7 @@ import { parseSexp, children, child, isList, type SexpNode, type Bounds } from '
 import { symbolSearchDirs, findLibraryFile, findSymbolAcrossLibraries, closestSymbolNames } from '../symlib.js';
 import { EMIT_VERSION, renameSymbolBlock } from '../emit.js';
 import { libTableRows } from '../libtable.js';
+import { childSpans } from '../spans.js';
 
 /**
  * Symbol resolution for the drafting engine, with hermetic vendoring (design
@@ -284,6 +285,7 @@ async function crossLibrarySuggestions(name: string, lib: string, dirs: string[]
 export class SymbolSource {
   private cache = new Map<string, ResolvedSymbol>();
   private projectLibs: Promise<Map<string, string>> | null = null;
+  private projectTable: Promise<string | null> | null = null;
 
   /**
    * Libraries the project's own `sym-lib-table` names (#314): a project-local
@@ -292,6 +294,14 @@ export class SymbolSource {
    * they are copperhead's own, and `resolve` reads the cache directly.
    */
   private async projectLibrary(lib: string): Promise<string | null> {
+    // Most nicknames have no user row: answer those from the table's text, so a
+    // draft of vendored symbols never expands path variables (which asks
+    // kicad-cli for its version). A nested Table row can hide one, and a table
+    // this cannot read is left to the full reader, as before.
+    this.projectTable ??= readFile(path.join(this.projectDir ?? this.repoRoot, 'sym-lib-table'), 'utf8').catch(() => null);
+    const table = await this.projectTable;
+    if (table === null) return null;
+    if (!/\(type\s+"?Table"?\s*\)/.test(table) && !this.userRowNames(table).has(lib)) return null;
     this.projectLibs ??= (async () => {
       const { rows } = await libTableRows('sym', { projectDir: this.projectDir ?? this.repoRoot, global: false });
       const cache = path.resolve(this.cacheDir());
@@ -302,6 +312,24 @@ export class SymbolSource {
       return out;
     })();
     return (await this.projectLibs).get(lib) ?? null;
+  }
+
+  /** Nicknames of the table's rows that are not copperhead's own cache rows; every name when it does not parse. */
+  private userRowNames(table: string): { has: (lib: string) => boolean } {
+    try {
+      const open = table.indexOf('(sym_lib_table');
+      if (open < 0) return { has: () => true };
+      const names = new Set(
+        childSpans(table, open)
+          .filter((s) => s.tag === 'lib')
+          .map((s) => table.slice(s.start, s.end))
+          .filter((row) => !row.includes(`${SYM_CACHE_DIR}/`))
+          .map((row) => /\(name\s+"?([^"\s)]+)"?\s*\)/.exec(row)?.[1] ?? ''),
+      );
+      return names;
+    } catch {
+      return { has: () => true };
+    }
   }
 
   /**

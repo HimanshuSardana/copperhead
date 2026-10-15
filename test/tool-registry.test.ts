@@ -532,7 +532,7 @@ describe('tool-registry catalog', () => {
         version: 1,
         viewHint: 'diagnostic',
         tools: ['list_nets'],
-        maxTurns: 3,
+        maxTurns: 4,
         prompt: () => '',
         isComplete: () => done,
       });
@@ -548,13 +548,15 @@ describe('tool-registry catalog', () => {
         },
         // tool-less, cut too: the notice arrives as its nudge
         { text: 'thinking', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, nudge: notice, notice },
+        // a main-loop nudge (propose_change) names tools a skill does not have
+        { text: 'thinking', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, nudge: 'call propose_change, then validate_change' },
         { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
       ];
       const provider: Provider = {
         name: 'scripted',
         chat: async (messages) => {
           seen.push([...messages]);
-          if (seen.length === 3) done = true;
+          if (seen.length === 4) done = true;
           return turns[seen.length - 1]!;
         },
       };
@@ -564,6 +566,7 @@ describe('tool-registry catalog', () => {
       expect(toolAt).toBeGreaterThanOrEqual(0);
       expect(second.findIndex((m) => m.role === 'user' && m.content === notice)).toBeGreaterThan(toolAt);
       expect(seen[2]!.at(-1)).toEqual({ role: 'user', content: notice });
+      expect(seen[3]!.at(-1)).toEqual({ role: 'user', content: 'Continue using tools until the report is complete.' });
       const events = (await readFile(path.join(ctx.transcript.dir, 'transcript.jsonl'), 'utf8'))
         .split('\n')
         .filter(Boolean)

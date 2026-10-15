@@ -672,12 +672,12 @@ async function runWithProviders(opts: RunOptions, providers: Set<Provider>): Pro
     // of its own "results" to disregard (a tool-less turn got this as its nudge).
     if (res.notice) messages.push({ role: 'user', content: res.notice });
 
-    // Not when this same turn went on to finish done: that finish is approved
-    // only after the checks passed, and nothing after it in the turn runs, so
-    // its violations do not persist, whatever the count reached on the way (a
+    // Not when this same turn went on to finish: a finish done is approved only
+    // after the checks passed, and nothing after it in the turn runs, so its
+    // violations do not persist, whatever the count reached on the way (a
     // batched turn: a failed repair, a fix, a clean check, finish). A refusal
-    // passes no check, so it does not hide an exhausted budget.
-    if (ctx.finishRequest?.outcome !== 'done' && repairBudgetExhausted(ctx.repairCycles, config.maxRepairCycles)) {
+    // restores the snapshot either way, and keeps the budget it cites (AC-3.4).
+    if (!ctx.finishRequest && repairBudgetExhausted(ctx.repairCycles, config.maxRepairCycles)) {
       return fail(`repair cycles exhausted (${config.maxRepairCycles}); violations persist`, 'repair-cycles-exhausted');
     }
 

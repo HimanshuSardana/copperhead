@@ -285,6 +285,10 @@ async function runCheck(
   const dir = await mkdtemp(path.join(tmpdir(), 'copperhead-'));
   const out = path.join(dir, `${kind}.json`);
   const sub = kind === 'erc' ? ['sch', 'erc'] : ['pcb', 'drc'];
+  // the board DRC reads, read first: a shared reference on it is never one
+  // footprint's own geometry (AC-15.41). Unreadable here, KiCad reports why.
+  const duplicateRefs =
+    kind === 'drc' ? await readFile(filePath, 'utf8').then(duplicateFootprintRefs, () => new Set<string>()) : undefined;
   try {
     const res = await runKicad(
       [...sub, '--format', 'json', '--exit-code-violations', '--output', out, ...extraArgs, filePath],
@@ -303,8 +307,7 @@ async function runCheck(
         `kicad-cli ${kind} produced no report — the ${kind === 'erc' ? 'schematic' : 'board'} file likely fails to load in KiCad. kicad-cli output: ${detail || '(none)'}`,
       );
     }
-    if (kind === 'erc') return normalizeReport(raw, kind);
-    return normalizeReport(raw, kind, { duplicateRefs: duplicateFootprintRefs(await readFile(filePath, 'utf8')) });
+    return normalizeReport(raw, kind, duplicateRefs ? { duplicateRefs } : {});
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

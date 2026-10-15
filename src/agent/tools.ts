@@ -106,13 +106,14 @@ export async function runSkillSubRun(opts: {
       }
       messages.push({ role: 'assistant', content: res.text, toolCalls: res.toolCalls });
       // #320, as in the main loop: a reply that invented its own tool results was
-      // cut, and the model hears so (a tool-less turn through its nudge)
+      // cut, and the model hears so. Only that notice: the provider's other
+      // nudges point at main-loop tools (propose_change) a skill does not offer.
       if (res.notice) {
         await ctx.transcript.event('fabricated-results', { skill: skill.name, notice: res.notice, discarded: res.discarded ?? null });
       }
       if (!res.toolCalls.length) {
         if (await skill.isComplete(ctx, args)) break;
-        messages.push({ role: 'user', content: res.nudge ?? 'Continue using tools until the report is complete.' });
+        messages.push({ role: 'user', content: res.notice ?? 'Continue using tools until the report is complete.' });
         continue;
       }
       for (const call of res.toolCalls) {

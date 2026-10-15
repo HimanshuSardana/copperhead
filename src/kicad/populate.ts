@@ -753,17 +753,38 @@ export async function populateBoard(opts: PopulateOptions): Promise<PopulateResu
   const tops = childSpans(text, open);
   const stale = tops.filter((sp) => sp.tag === 'net' && !/^\(net\s+0\s+""\)$/.test(text.slice(sp.start, sp.end)));
   if (stale.length) {
-    const wired = tops.filter((sp) => /^(segment|arc|via|zone)$/.test(sp.tag)).length;
+    // an item is on an old net by code, or by name where a board omits codes;
+    // a keepout or a net-0 track is on none of them
+    const codes = new Set<string>();
+    const names = new Set<string>();
+    for (const sp of stale) {
+      const m = /^\(net\s+(?:(\d+)\s+)?"((?:[^"\\]|\\.)*)"/.exec(text.slice(sp.start, sp.end));
+      if (m?.[1]) codes.add(m[1]);
+      if (m?.[2]) names.add(m[2]);
+    }
+    const onOldNet = (sp: Span): boolean => {
+      const body = text.slice(sp.start, sp.end);
+      const code = /\(net\s+(\d+)[\s)]/.exec(body)?.[1];
+      const name = /\(net(?:_name)?\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"\)/.exec(body)?.[1];
+      return (code !== undefined && codes.has(code)) || (name !== undefined && names.has(name));
+    };
+    const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onOldNet(sp)).length;
     if (wired) {
       throw new Error(
-        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s) or zone(s) on them; ` +
+        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s), zone(s) or shape(s) on them; ` +
           'populate fills an empty board only: remove that copper, or start from the scaffolded board',
       );
     }
     for (const sp of stale) {
-      // the whole line, so the table left behind keeps its layout
-      const at = text.lastIndexOf('\n', sp.start - 1) + 1;
-      const end = text[sp.end] === '\n' ? sp.end + 1 : sp.end;
+      // the whole line when the declaration is alone on it, so the table left
+      // behind keeps its layout; else the declaration alone, which keeps clear
+      // of a neighbour on its line and of the insert after `(net 0 "")`
+      const lineStart = text.lastIndexOf('\n', sp.start - 1) + 1;
+      const nl = text.indexOf('\n', sp.end);
+      const lineEnd = nl < 0 ? text.length : nl;
+      const alone = !text.slice(lineStart, sp.start).trim() && !text.slice(sp.end, lineEnd).trim();
+      const at = alone ? lineStart : sp.start;
+      const end = alone && nl >= 0 ? nl + 1 : sp.end;
       edits.push({ at, del: end - at, ins: '' });
     }
   }
