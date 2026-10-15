@@ -746,6 +746,27 @@ export async function populateBoard(opts: PopulateOptions): Promise<PopulateResu
       grown = true;
     }
   }
+  // A board with no footprints can still declare nets: one whose footprints
+  // were deleted keeps its old table. Its codes would collide with the fresh
+  // table, and KiCad reads a code by its first declaration, so the old table
+  // goes, unless copper on the board still refers to it.
+  const tops = childSpans(text, open);
+  const stale = tops.filter((sp) => sp.tag === 'net' && !/^\(net\s+0\s+""\)$/.test(text.slice(sp.start, sp.end)));
+  if (stale.length) {
+    const wired = tops.filter((sp) => /^(segment|arc|via|zone)$/.test(sp.tag)).length;
+    if (wired) {
+      throw new Error(
+        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s) or zone(s) on them; ` +
+          'populate fills an empty board only: remove that copper, or start from the scaffolded board',
+      );
+    }
+    for (const sp of stale) {
+      // the whole line, so the table left behind keeps its layout
+      const at = text.lastIndexOf('\n', sp.start - 1) + 1;
+      const end = text[sp.end] === '\n' ? sp.end + 1 : sp.end;
+      edits.push({ at, del: end - at, ins: '' });
+    }
+  }
   const netDecl = netNames.map((n) => `\t(net ${code.get(n)} ${q(n)})`).join('\n');
   const net0 = /\(net\s+0\s+""\)/.exec(text);
   if (net0) edits.push({ at: net0.index + net0[0].length, del: 0, ins: `\n${netDecl}` });

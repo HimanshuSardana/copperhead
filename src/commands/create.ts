@@ -33,7 +33,7 @@ import { openspecInit } from '../openspec/cli.js';
 import { sweepStaleTempDirs, pruneHistoryDir } from '../util/tmp.js';
 import { bomSymbolDossier } from '../kicad/dossier.js';
 import { symbolSearchDirs } from '../kicad/symlib.js';
-import { isDraftQualityHeading } from '../kicad/fab.js';
+import { draftQualitySection, isFilledDraftQuality } from '../kicad/fab.js';
 import { assertDiskSpace, DEFAULT_MIN_FREE_BYTES } from '../util/preflight.js';
 import { runCheck } from './check.js';
 import { emitCreateJlcpcbBom } from './export.js';
@@ -61,18 +61,26 @@ async function docHasContent(repoRoot: string, rel: string, marker: string): Pro
   return (await readFile(p, 'utf8')).includes(marker);
 }
 
+/**
+ * The layout document's Draft quality section, under a numbered heading or not
+ * (#327): 'missing' with no such heading, 'empty' when only comments sit under
+ * it (the placeholder `copperhead init` scaffolds), else 'filled'. The same
+ * test `check --fab` applies, so the stage never finishes on a section the
+ * fab check then calls empty.
+ */
+async function draftQualityState(repoRoot: string, rel: string): Promise<'missing' | 'empty' | 'filled'> {
+  const p = path.join(repoRoot, rel);
+  if (!existsSync(p)) return 'missing';
+  const section = draftQualitySection(await readFile(p, 'utf8'));
+  if (section === null) return 'missing';
+  return isFilledDraftQuality(section) ? 'filled' : 'empty';
+}
+
 // Heading-aware variant of docHasContent: matches any Markdown heading whose
 // text contains `word`, ignoring heading level, leading numbering ("3."), and
 // trailing decoration ("Budgets and constraints (...)"). Stage prompts don't
 // dictate exact heading text, so a literal `.includes('## Budgets')` produces
 // false negatives against valid docs titled e.g. "## 3. Budgets and constraints".
-/** The layout document has its Draft quality heading, numbered or not (#327). */
-async function docHasDraftQuality(repoRoot: string, rel: string): Promise<boolean> {
-  const p = path.join(repoRoot, rel);
-  if (!existsSync(p)) return false;
-  return (await readFile(p, 'utf8')).split(/\r?\n/).some(isDraftQualityHeading);
-}
-
 async function docHasHeading(repoRoot: string, rel: string, word: string): Promise<boolean> {
   const p = path.join(repoRoot, rel);
   if (!existsSync(p)) return false;
@@ -270,21 +278,7 @@ export const STAGES: Stage[] = [
   },
   {
     name: 'layout-draft',
-    isComplete: async (root, docs) => {
-      // The LAYOUT.md marker alone is not enough: `copperhead init` scaffolds
-      // LAYOUT.md with the literal "## Draft quality" heading. And "a board
-      // with a footprint" was not enough either (#314): the board must carry
-      // exactly the schematic's parts, each with its schematic footprint, so
-      // an outline-only board or a partial one never passes (AC-15.38).
-      const config = await loadConfig(root);
-      if (!config.board || !config.schematic) return false;
-      if (!(await boardMatchesSchematic(root, config)).ok) return false;
-      if (await layoutDocGap(root, docs)) return false;
-      // DRC-clean is part of "done", as ERC is for the schematic stage: a run
-      // killed after Draft quality was written but before a clean run_drc must
-      // not resume as complete and get its board committed unverified
-      return boardDrcOk(root, config.board);
-    },
+    isComplete: async (root, docs) => (await layoutDraftGap(root, docs)) === null,
     prompt: (_brief, docs) => {
       // posix: this path is shown to the model, and must read the same on Windows
       const layoutDoc = path.posix.join(docs, 'LAYOUT.md');
@@ -497,12 +491,40 @@ async function populateStop(opts: CreateOptions): Promise<string | null> {
  */
 export async function layoutDocGap(root: string, docs: string): Promise<string | null> {
   const layoutDoc = path.posix.join(docs, 'LAYOUT.md');
-  if (await docHasDraftQuality(root, layoutDoc)) return null;
-  const stray = layoutDoc !== 'LAYOUT.md' && (await docHasDraftQuality(root, 'LAYOUT.md'));
+  const state = await draftQualityState(root, layoutDoc);
+  if (state === 'filled') return null;
+  if (state === 'empty') {
+    return `the "## Draft quality" section in ${layoutDoc} is empty: write what is fine, how many connections are still unrouted, and what a human should redo`;
+  }
+  const stray = layoutDoc !== 'LAYOUT.md' && (await draftQualityState(root, 'LAYOUT.md')) === 'filled';
   return (
     `${layoutDoc} has no "## Draft quality" section` +
     (stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '')
   );
+}
+
+/**
+ * What keeps layout-draft from being complete, or null when it is. The
+ * document alone is not enough: `copperhead init` scaffolds its heading, and
+ * populate puts the schematic's parts on the board before the first turn, so
+ * a gate that read either alone would pass a stage nobody placed (#314). The
+ * board must carry exactly the schematic's parts, each with its schematic
+ * footprint (AC-15.38), and pass DRC, as ERC is part of "done" for the
+ * schematic stage: a run killed after Draft quality was written but before a
+ * clean run_drc must not resume as complete and get its board committed
+ * unverified. Cheapest first, since finish asks on every attempt: a file
+ * read, then a netlist export, then a full DRC.
+ */
+async function layoutDraftGap(root: string, docs: string): Promise<string | null> {
+  const docGap = await layoutDocGap(root, docs);
+  if (docGap) return docGap;
+  const config = await loadConfig(root);
+  const m = await boardMatchesSchematic(root, config);
+  if (!m.ok) return `${m.detail}; restore the populated footprints (never add or rewrite them) and move them instead`;
+  if (!(await boardDrcOk(root, config.board!))) {
+    return 'the board does not pass DRC; run run_drc and fix what it reports before finishing';
+  }
+  return null;
 }
 
 async function contractGapDetail(stageName: string, root: string, config: CopperheadConfig): Promise<string> {
@@ -1141,8 +1163,10 @@ export async function runCreate(opts: CreateOptions): Promise<{ ok: boolean; com
           // message yet, and a generic one would only spend turns.
           ...(stage.name === 'layout-draft'
             ? {
-                stageGate: async () =>
-                  (await stage.isComplete(opts.repoRoot, config.docs)) ? null : contractGapDetail(stage.name, opts.repoRoot, config),
+                stageGate: async () => {
+                  const gap = await layoutDraftGap(opts.repoRoot, config.docs);
+                  return gap && `the layout-draft contract is not met: ${gap}`;
+                },
               }
             : {}),
           ...(stageTurns !== undefined ? { maxTurns: stageTurns } : {}),

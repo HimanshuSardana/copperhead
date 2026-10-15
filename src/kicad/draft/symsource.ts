@@ -288,8 +288,8 @@ export class SymbolSource {
   /**
    * Libraries the project's own `sym-lib-table` names (#314): a project-local
    * vendor library (an Espressif module, say) resolves without copying the
-   * stock set around it. Rows pointing into the vendored cache are skipped,
-   * since `resolve` reads the cache first anyway.
+   * stock set around it. Rows pointing into the vendored cache are skipped:
+   * they are copperhead's own, and `resolve` reads the cache directly.
    */
   private async projectLibrary(lib: string): Promise<string | null> {
     this.projectLibs ??= (async () => {
@@ -406,7 +406,7 @@ export class SymbolSource {
     };
   }
 
-  /** Resolve a lib_id: vendored copy first, else installed library (then vendor it). */
+  /** Resolve a lib_id: the project's own library first, then the vendored copy, else the installed library (then vendor it). */
   async resolve(libId: string, depth = 0): Promise<ResolvedSymbol> {
     const hit = this.cache.get(libId);
     if (hit) return hit;
@@ -417,18 +417,18 @@ export class SymbolSource {
     let block: string | null = null;
     let fromInstalled = false;
     // a library the project's own sym-lib-table names is already project-local:
-    // it is read in place, never copied into the vendored cache, so the user's
+    // it is read in place, before any cache file of that nickname (one an
+    // earlier draft vendored) and never copied into the cache, so the user's
     // row stays the source and every symbol in it stays reachable (a partial
     // cache under the same nickname would shadow the rest)
-    let fromProject = false;
-    if (existsSync(vendored)) {
+    const project = await this.projectLibrary(lib);
+    const fromProject = project !== null;
+    if (!fromProject && existsSync(vendored)) {
       block = extractSymbolBlock(await readFile(vendored, 'utf8'), name);
       if (block) this.libs.add(lib);
     }
     if (!block) {
       const dirs = this.searchDirs ?? (await symbolSearchDirs());
-      const project = await this.projectLibrary(lib);
-      fromProject = project !== null;
       const file = project ?? (await findLibraryFile(lib, dirs));
       if (!file) {
         const elsewhere = await crossLibrarySuggestions(name, lib, dirs);

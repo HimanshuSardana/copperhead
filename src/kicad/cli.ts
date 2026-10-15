@@ -3,7 +3,7 @@ import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { normalizeReport, type CheckReport } from './report.js';
+import { duplicateFootprintRefs, normalizeReport, type CheckReport } from './report.js';
 import { PreflightError, isNotFoundError } from '../util/preflight.js';
 
 export class KicadCliMissingError extends PreflightError {
@@ -303,7 +303,8 @@ async function runCheck(
         `kicad-cli ${kind} produced no report — the ${kind === 'erc' ? 'schematic' : 'board'} file likely fails to load in KiCad. kicad-cli output: ${detail || '(none)'}`,
       );
     }
-    return normalizeReport(raw, kind);
+    if (kind === 'erc') return normalizeReport(raw, kind);
+    return normalizeReport(raw, kind, { duplicateRefs: duplicateFootprintRefs(await readFile(filePath, 'utf8')) });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
