@@ -454,6 +454,21 @@ const retypedId = (m: MissingFootprint): boolean =>
 
 const modelFixable = (m: MissingFootprint): boolean => !!m.symbol || m.why !== 'no-library' || (m.near.length > 0 && !m.fuzzy);
 
+/** The footprint misses a stage's model can fix, listed for its retry. */
+function footprintMissDetail(fixable: MissingFootprint[]): string {
+  return (
+    `${fixable.length} BOM.md footprint(s) do not resolve to an installed footprint — ` +
+    fixable
+      .map(
+        (m) =>
+          `${m.ref} ${m.footprint || '(none)'}${m.symbol ? ' is a symbol id, not a footprint id' : ''}` +
+          (m.near.length ? ` (${m.symbol ? 'footprints it accepts' : 'installed'}: ${m.near.slice(0, 3).join(', ')})` : ''),
+      )
+      .join('; ') +
+    '; call check_footprints on every Footprint cell and use exact installed ids'
+  );
+}
+
 async function bomFootprintStop(root: string, config: CopperheadConfig): Promise<string | null> {
   const r = await bomFootprintMisses(root, config.docs);
   return r?.missing.length ? formatMissingFootprints(r.missing, r.searched, 'the schematic stage') : null;
@@ -521,21 +536,6 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   return (
     `${layoutDoc} has no "## Draft quality" section` +
     (stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '')
-  );
-}
-
-/** The footprint misses a stage's model can fix, listed for its retry. */
-function footprintMissDetail(fixable: MissingFootprint[]): string {
-  return (
-    `${fixable.length} BOM.md footprint(s) do not resolve to an installed footprint — ` +
-    fixable
-      .map(
-        (m) =>
-          `${m.ref} ${m.footprint || '(none)'}${m.symbol ? ' is a symbol id, not a footprint id' : ''}` +
-          (m.near.length ? ` (${m.symbol ? 'footprints it accepts' : 'installed'}: ${m.near.slice(0, 3).join(', ')})` : ''),
-      )
-      .join('; ') +
-    '; call check_footprints on every Footprint cell and use exact installed ids'
   );
 }
 
