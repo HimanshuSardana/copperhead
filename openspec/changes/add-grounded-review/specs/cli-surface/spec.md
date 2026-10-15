@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: `review` command
-The CLI SHALL provide `copperhead review [design] --out <dir>`, marked experimental, with `--source`, `--fab`, `--fab-profile`, `--model`, `--domains`, `--max-turns`, `--max-minutes`, `--parallel`, `--label`, `--sweep`, `--tools`, `--replay` and `--resume`. It SHALL refuse an `--out` that is not empty, or that lies inside the design or inside a `--source` or `--fab` input once symbolic links are resolved, and SHALL never write the design. It SHALL refuse a `--max-turns` or `--parallel` that is not a positive whole number and a `--max-minutes` that is not a positive number, before writing anything. It SHALL exit 0 when every pass ended and the report was written, 2 when the report was written but a pass failed, 1 on an error or a replay that differs, with a message and without a stack trace, and 130 or 143 when cancelled by SIGINT or SIGTERM.
+The CLI SHALL provide `copperhead review [design] --out <dir>`, marked experimental, with `--source`, `--fab`, `--fab-profile`, `--model`, `--domains`, `--max-turns`, `--max-minutes`, `--parallel`, `--label`, `--sweep`, `--tools`, `--replay` and `--resume`. It SHALL refuse an `--out` that is not empty, or that lies inside the design or inside a `--source` or `--fab` input once symbolic links are resolved, and SHALL never write the design. It SHALL refuse a `--max-turns` or `--parallel` that is not a positive whole number, a `--max-minutes` that is not a positive number, and a `--domains` that names no domain, before writing anything. It SHALL exit 0 when every pass ended and the report was written, 2 when the report was written but a pass failed, 1 on an error or a replay that differs, with a message and without a stack trace, and 130 or 143 when cancelled by SIGINT or SIGTERM.
 
 #### Scenario: Record outside the design
 - **WHEN** `copperhead review ./board --out ./board/review` is run
@@ -37,11 +37,15 @@ A text-protocol tool call SHALL take its arguments from `args`, else from `argum
 - **THEN** no call runs, and the nudge names `board`, the `<invoke>` block and `{"tool": "board", "args": { ... }}`
 
 ### Requirement: Resuming a killed run
-`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled), keep an interrupted or unreadable sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt.
+`copperhead review --resume --out <dir>` SHALL reuse the record's sweep and bundle, keep every pass whose sample records an end (submitted, turns or time exhausted, stalled) under the same model, prompt templates and budgets as the resumed run, keep any other sample beside a fresh rerun of its pass, and then verify and record as a fresh run would. A bundle that does not parse SHALL be rebuilt.
 
 #### Scenario: One pass failed
 - **WHEN** a record holds seven submitted passes and one that failed, and `--resume` is run
 - **THEN** only the failed domain's pass runs, and the bundle is not rebuilt
+
+#### Scenario: Resumed with another model
+- **WHEN** `--resume` is run with a `--model` other than the one a submitted pass ran with
+- **THEN** that pass runs again, so the lockfile's model is the one every kept pass used
 
 ### Requirement: Progress lines
 `copperhead review` SHALL write its progress to stderr, one line per event, in these forms, which an editor integration parses: `sweep: <JSON summary>` or `sweep: using the record at <dir>`; `bundle: <JSON summary>`; `[<domain>] pass starts (<title>)`; `[<domain>] pass ends: <outcome> after <n> turns, <n> proposals, <n> s`, followed by a space and `(<error>)` when the pass recorded one; and on resume `[<domain>] resume: keeping the pass that ended <outcome> after <n> turns`. Every pass that starts SHALL write its `pass ends` line, a pass whose provider could not start included. Progress lines SHALL be redacted like samples.

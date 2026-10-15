@@ -60,6 +60,18 @@ export interface PassRecord {
   calls: { turn: number; tool: string; args: unknown; result: string; ms: number }[];
   transcript: { role: string; content: string | null; toolCalls?: ToolCall[]; toolCallId?: string }[];
   summary: string | null;
+  /** What the pass ran under, so `--resume` keeps it only for a run that would ask the same. */
+  provenance?: PassProvenance;
+}
+
+export interface PassProvenance {
+  templateVersion: string;
+  /** sha256 of the rules, the tool schemas and the domain task the pass was given. */
+  rules: string;
+  tools: string;
+  task: string;
+  maxTurns: number;
+  maxMinutes: number;
 }
 
 export interface PassOptions {
@@ -173,14 +185,26 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
   let idle = 0;
   let timeouts = 0;
   let warned = false;
+  // The pass stops when it is cancelled or its wall-clock budget runs out, in flight too: a turn,
+  // a query or a pre-check under way is torn down then, not left to run to its own limit.
+  const deadline = new AbortController();
+  const deadlineTimer = setTimeout(() => deadline.abort(), Math.min(o.maxSeconds * 1000, 2 ** 31 - 1));
+  const halt = new AbortController();
+  const onHalt = () => halt.abort();
+  if (o.signal?.aborted) halt.abort();
+  o.signal?.addEventListener('abort', onHalt, { once: true });
+  deadline.signal.addEventListener('abort', onHalt, { once: true });
+  const stop = halt.signal;
   // The sample is saved at the end of every turn, whichever way the turn ends, so a pass that is
-  // killed leaves every turn it had taken (design D5).
+  // killed leaves every turn it had taken (design D5). A sample that cannot be saved ends the pass.
   const checkpoint = async () => {
     if (!o.onTurn) return;
     rec.proposals = [...proposals.values()];
     rec.seconds = Math.round((Date.now() - started) / 1000);
     rec.transcript = transcriptOf(messages);
-    await o.onTurn(rec).catch(() => undefined);
+    await o.onTurn(rec).catch((e: unknown) => {
+      throw new Error(`could not save the sample: ${(e as Error).message}`);
+    });
   };
   const close = () => o.provider.close?.();
   // One provider turn: an inactivity watchdog (a turn that keeps streaming is not hung) with a
@@ -189,7 +213,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
     untilAborted(
       withRetry(
         () => {
-          if (o.signal?.aborted) throw new CancelledError();
+          if (stop.aborted) throw new CancelledError();
           return withWatchdog((activity) => o.provider.chat(messages, PASS_TOOLS, { onStream: () => activity() }), {
             idleMs: o.turnTimeoutMs,
             maxMs: o.turnMaxMs ?? 3 * o.turnTimeoutMs,
@@ -200,15 +224,15 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
           baseMs: o.rateLimitBaseMs ?? 5000,
           isRetryable: isRateLimit,
           onRetry: (attempt) => o.log(`[${o.domain}] turn ${turn}: rate limited; retry ${attempt} of 3`),
-          sleep: (ms) => delay(ms, o.signal),
+          sleep: (ms) => delay(ms, stop),
         },
       ),
-      o.signal,
+      stop,
       close,
     );
   try {
     for (let turn = 1; turn <= o.maxTurns; turn++) {
-      if (o.signal?.aborted) throw new CancelledError();
+      if (stop.aborted) throw new CancelledError();
       if ((Date.now() - started) / 1000 > o.maxSeconds) {
         rec.outcome = 'time-exhausted';
         break;
@@ -238,6 +262,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
       if (!reply.toolCalls.length) {
         if (++idle >= 3) {
           rec.outcome = 'stalled';
+          await checkpoint();
           break;
         }
         messages.push({ role: 'user', content: reply.nudge ?? 'Reply with exactly one tool call: a query, propose, or submit.' });
@@ -254,14 +279,14 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
           result = `Submitted ${proposals.size} proposal(s).`;
           done = true;
         } else if (call.name === 'propose') {
-          result = await propose(o, call.args, proposals, scratch);
+          result = await propose(o, call.args, proposals, scratch, stop);
         } else {
           const q = QUERIES.find((x) => x.name === call.name);
           if (!q) result = `Unknown tool ${call.name}.`;
           else {
             const args = { ...call.args, ...(q.preset ?? {}) };
             try {
-              const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) }, o.signal ? { signal: o.signal } : {});
+              const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) }, { signal: stop });
               const d = r.data as { ok?: boolean; text?: string; problem?: string } | undefined;
               result = d?.ok ? (d.text ?? '') : `Problem: ${d?.problem ?? 'no result'}`;
               if (!d?.ok && !Object.keys(call.args).length && (q.required ?? []).length) {
@@ -279,17 +304,20 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
         if (done) break;
       }
       if (reply.notice) messages.push({ role: 'user', content: reply.notice });
+      if (done) rec.outcome = 'submitted';
       await checkpoint();
-      if (done) {
-        rec.outcome = 'submitted';
-        break;
-      }
+      if (done) break;
     }
     if (rec.outcome === 'running') rec.outcome = 'turns-exhausted';
   } catch (e) {
-    rec.outcome = 'failed';
-    rec.error = (e as Error).message;
+    if (e instanceof CancelledError && deadline.signal.aborted && !o.signal?.aborted) rec.outcome = 'time-exhausted';
+    else {
+      rec.outcome = 'failed';
+      rec.error = (e as Error).message;
+    }
   } finally {
+    clearTimeout(deadlineTimer);
+    o.signal?.removeEventListener('abort', onHalt);
     await o.provider.close?.();
     await rm(scratch, { recursive: true, force: true });
   }
@@ -304,12 +332,13 @@ function transcriptOf(messages: Msg[]): PassRecord['transcript'] {
 }
 
 /** Hold the proposals and return each one's outcome from a verifier pre-check over everything held. */
-async function propose(o: PassOptions, args: Record<string, unknown>, held: Map<string, Record<string, unknown>>, scratch: string): Promise<string> {
+async function propose(o: PassOptions, args: Record<string, unknown>, held: Map<string, Record<string, unknown>>, scratch: string, signal: AbortSignal): Promise<string> {
   const list = Array.isArray(args.proposals) ? args.proposals : null;
   if (!list || !list.length) return 'Problem: propose needs "proposals", a non-empty array of proposal objects.';
+  // The batch is checked whole before any of it is held: a refused batch holds nothing.
+  if (list.some((raw) => !raw || typeof raw !== 'object' || typeof (raw as { id?: unknown }).id !== 'string')) return 'Problem: every proposal needs a string "id"; none of this batch was held.';
   const ids: string[] = [];
   for (const raw of list) {
-    if (!raw || typeof raw !== 'object' || typeof (raw as { id?: unknown }).id !== 'string') return 'Problem: every proposal needs a string "id".';
     const p = normalizeProposal(o.domain, raw as Record<string, unknown>);
     held.set(p.id as string, p);
     ids.push(p.id as string);
@@ -317,7 +346,7 @@ async function propose(o: PassOptions, args: Record<string, unknown>, held: Map<
   const file = path.join(scratch, 'proposals.json');
   await writeFile(file, JSON.stringify({ format: 'copperhead-review-proposals', version: 1, proposals: [...held.values()] }));
   try {
-    const r = await o.tools.run('review-verify', { bundle: o.bundlePath, proposals: file }, o.signal ? { signal: o.signal } : {});
+    const r = await o.tools.run('review-verify', { bundle: o.bundlePath, proposals: file }, { signal });
     const vs = ((r.data as { verifications?: { id: string; outcome: string; class: string | null; verifier: string; reason: string; claim: string | null; severity?: string; severityNote?: string }[] }).verifications ?? []);
     const byId = new Map(vs.map((v) => [v.id, v]));
     return ids

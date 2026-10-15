@@ -486,6 +486,7 @@ program
           log,
           signal: cancel.signal,
         });
+        if (cancelCode) throw new Error('cancelled');
         if (json) console.log(JSON.stringify(res, null, 2));
         else {
           console.log(`report: ${res.report}`);

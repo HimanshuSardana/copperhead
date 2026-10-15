@@ -255,6 +255,53 @@ describe('review: one pass', () => {
     expect(Date.now() - t0).toBeLessThan(5_000);
     expect(closed).toBeGreaterThan(0);
   });
+
+  it('ends a pass whose time runs out during a turn, without waiting for the turn', async () => {
+    let closed = 0;
+    const endless: Provider = {
+      name: 'endless',
+      chat: (_m: Msg[], _t, opts?: ChatOpts) =>
+        new Promise<Turn>(() => {
+          const t = setInterval(() => opts?.onStream?.(1), 20);
+          setTimeout(() => clearInterval(t), 20_000);
+        }),
+      async close() {
+        closed++;
+      },
+    };
+    const t0 = Date.now();
+    const rec = await runPass({ domain: 'P', model: 's', provider: endless, tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 5, maxSeconds: 0.3, turnTimeoutMs: 10_000, turnMaxMs: 20_000, log: () => undefined });
+    expect(rec).toMatchObject({ outcome: 'time-exhausted', error: null, turns: 1 });
+    expect(Date.now() - t0).toBeLessThan(5_000);
+    expect(closed).toBeGreaterThan(0);
+  });
+
+  it('saves the turn that ends a pass with its outcome, and ends a pass whose sample cannot be saved', async () => {
+    const saved: [number, string][] = [];
+    await runPass({ domain: 'P', model: 's', provider: scriptedProvider([{ text: 'thinking' }]), tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 10, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined, onTurn: async (r) => void saved.push([r.turns, r.outcome]) });
+    expect(saved).toEqual([[1, 'running'], [2, 'running'], [3, 'stalled']]);
+    const full = await runPass({
+      domain: 'P', model: 's', provider: scriptedProvider([{ toolCalls: [{ name: 'nets', args: {} }] }]), tools: fakeTools(), bundlePath: 'b', system: 's', task: 't', maxTurns: 10, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined,
+      onTurn: async () => {
+        throw new Error('ENOSPC: no space left on device');
+      },
+    });
+    expect(full).toMatchObject({ outcome: 'failed', turns: 1, error: 'could not save the sample: ENOSPC: no space left on device' });
+  });
+
+  it('holds none of a propose batch that holds an invalid proposal', async () => {
+    const tools = fakeTools();
+    const rec = await runPass({
+      domain: 'P', model: 's', tools, bundlePath: 'b', system: 's', task: 't', maxTurns: 5, maxSeconds: 60, turnTimeoutMs: 10_000, log: () => undefined,
+      provider: scriptedProvider([
+        { toolCalls: [{ name: 'propose', args: { proposals: [{ id: 'P1', kind: 'fact', predicate: {} }, { kind: 'fact' }] } }] },
+        { toolCalls: [{ name: 'submit', args: {} }] },
+      ]),
+    });
+    expect(rec.calls[0]!.result).toMatch(/none of this batch was held/);
+    expect(rec.proposals).toEqual([]);
+    expect(tools.calls).toEqual([]);
+  });
 });
 
 describe('review: the run and its record', () => {
@@ -418,6 +465,49 @@ describe('review: the run and its record', () => {
     const res = await runReview({ ...base, resume: true, makeProvider: async () => (made++, submitter()) });
     expect(made).toBe(1);
     expect(res.passes[0]).toMatchObject({ domain: 'P', outcome: 'submitted' });
+  }, 30_000);
+
+  it('reruns a kept pass that ran with another model or budget, and refuses an empty domain list', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const design = path.join(root, 'design');
+    await mkdir(design);
+    const out = path.join(root, 'record');
+    const submitter = () => scriptedProvider([{ toolCalls: [{ name: 'submit', args: {} }] }]);
+    const base = { design, out, sources: [], domains: ['P'], maxMinutes: 5, parallel: 1, client: fakeTools() };
+    await runReview({ ...base, model: 's', maxTurns: 5, makeProvider: async () => submitter(), log: () => undefined });
+    const lines: string[] = [];
+    let made = 0;
+    const again = { ...base, resume: true, makeProvider: async () => (made++, submitter()), log: (l: string) => lines.push(l) };
+    await runReview({ ...again, model: 's', maxTurns: 5 });
+    expect(made).toBe(0);
+    await runReview({ ...again, model: 's', maxTurns: 6 });
+    expect(made).toBe(1);
+    await runReview({ ...again, model: 'other', maxTurns: 6 });
+    expect(made).toBe(2);
+    expect(lines.filter((l) => l.includes('rerunning'))).toEqual(Array(2).fill('[P] resume: rerunning the pass, which ran with another model, prompt or budget'));
+    await expect(runReview({ ...base, out: path.join(root, 'none'), domains: [], model: 's', maxTurns: 5, makeProvider: async () => submitter(), log: () => undefined })).rejects.toThrow(/--domains names no domain/);
+  }, 30_000);
+
+  it('reports a cancellation that lands during the last copperhead-tools call as one', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const design = path.join(root, 'design');
+    await mkdir(design);
+    const out = path.join(root, 'record');
+    const inner = fakeTools();
+    const cancel = new AbortController();
+    const client: ToolsClient = {
+      command: inner.command,
+      async run(tool, inputs, opts) {
+        if (tool === 'review-query' && inputs.op === 'calculators') {
+          cancel.abort();
+          throw new Error(`copperhead-tools ${tool}: cancelled`);
+        }
+        return inner.run(tool, inputs, opts);
+      },
+    };
+    const submitter = () => scriptedProvider([{ toolCalls: [{ name: 'submit', args: {} }] }]);
+    await expect(runReview({ design, out, sources: [], model: 's', domains: ['P'], maxTurns: 5, maxMinutes: 5, parallel: 1, client, makeProvider: async () => submitter(), log: () => undefined, signal: cancel.signal })).rejects.toThrow(CancelledError);
+    expect(await readdir(out)).not.toContain('review.lock.json');
   }, 30_000);
 
   it('refuses a record directory inside the design, or one that is not empty', async () => {

@@ -15,7 +15,7 @@ import { copyFile, mkdir, readdir, readFile, realpath, rename, stat, writeFile }
 import path from 'node:path';
 import type { Provider } from '../agent/types.js';
 import { DOMAINS, digest, domainTask, sha256, systemPrompt, TEMPLATE_VERSION, RULES } from './prompts.js';
-import { CancelledError, type PassRecord, PASS_TOOLS, runPass } from './pass.js';
+import { CancelledError, type PassProvenance, type PassRecord, PASS_TOOLS, runPass } from './pass.js';
 import { resolveTools, type ToolsClient } from './tools-client.js';
 import { redactSecrets } from '../util/redact.js';
 
@@ -50,6 +50,7 @@ export interface ReviewOptions {
    *   [<domain>] turn <n>: <tool> <args or "(<n> held)">
    *   [<domain>] pass ends: <outcome> after <n> turns, <n> proposals, <n> s[ (<error>)]
    *   [<domain>] resume: keeping the pass that ended <outcome> after <n> turns
+   *   [<domain>] resume: rerunning the pass, which ran with another model, prompt or budget
    */
   log: (line: string) => void;
   /** Paths given relative resolve against it, and the lockfile records paths inside it relative to it (default: the process's cwd). */
@@ -160,6 +161,7 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   const design = abs(o.design);
   const fab = (o.fab ?? []).map(abs);
   const domains = [...new Set(o.domains)];
+  if (!domains.length) throw new Error(`--domains names no domain; domains are ${Object.keys(DOMAINS).join(', ')}`);
   for (const d of domains) if (!DOMAINS[d]) throw new Error(`unknown domain "${d}"; domains are ${Object.keys(DOMAINS).join(', ')}`);
   positive('--max-turns', o.maxTurns, true);
   positive('--max-minutes', o.maxMinutes, false);
@@ -211,6 +213,20 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   const system = systemPrompt(digest(bundle));
 
   // 3. passes
+  // A kept pass must have asked what this run would ask, or the lockfile's single model, prompt
+  // hashes and budgets would claim it ran under settings it never saw.
+  const provenance = (domain: string): PassProvenance => ({
+    templateVersion: TEMPLATE_VERSION,
+    rules: sha256(RULES),
+    tools: sha256(JSON.stringify(PASS_TOOLS)),
+    task: sha256(domainTask(domain, o.maxTurns)),
+    maxTurns: o.maxTurns,
+    maxMinutes: o.maxMinutes,
+  });
+  const sameRun = (prior: PassRecord, domain: string) => {
+    const want = provenance(domain);
+    return prior.model === o.model && !!prior.provenance && (Object.keys(want) as (keyof PassProvenance)[]).every((k) => prior.provenance![k] === want[k]);
+  };
   const passes: (PassRecord | null)[] = await pool(domains, o.parallel, async (domain) => {
     if (signal?.aborted) return null;
     const sample = path.join(out, 'model', 'samples', `${domain}.json`);
@@ -222,13 +238,16 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
         // unreadable: the pass is rerun, and the file kept aside below
       }
       if (prior && ENDED.has(prior.outcome) && prior.turns > 0) {
-        log(`[${domain}] resume: keeping the pass that ended ${prior.outcome} after ${prior.turns} turns`);
-        return prior;
+        if (sameRun(prior, domain)) {
+          log(`[${domain}] resume: keeping the pass that ended ${prior.outcome} after ${prior.turns} turns`);
+          return prior;
+        }
+        log(`[${domain}] resume: rerunning the pass, which ran with another model, prompt or budget`);
       }
       await copyFile(sample, `${sample}.interrupted-${Date.now()}`);
     }
     // Samples hold model text and tool results, so they are redacted at write time like transcripts (AC-4.1).
-    const save = (r: PassRecord) => writeAtomic(sample, redactSecrets(`${JSON.stringify(r, null, 1)}\n`));
+    const save = (r: PassRecord) => writeAtomic(sample, redactSecrets(`${JSON.stringify({ ...r, provenance: provenance(domain) }, null, 1)}\n`));
     const ends = (r: PassRecord) => log(`[${domain}] pass ends: ${r.outcome} after ${r.turns} turns, ${r.proposals.length} proposals, ${r.seconds} s${r.error ? ` (${r.error})` : ''}`);
     log(`[${domain}] pass starts (${DOMAINS[domain]!.title})`);
     let provider: Provider;
@@ -257,6 +276,8 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
 
   // 5. record
   const toolsManifest = await tools.run('review-query', { bundle: bundlePath, op: 'calculators' }, sig).then((r) => r.package ?? null).catch(() => null);
+  // The lookup is best effort, but a cancellation during it is still a cancellation.
+  if (signal?.aborted) throw new CancelledError();
   const templates = { rules: sha256(RULES), tools: sha256(JSON.stringify(PASS_TOOLS)), ...Object.fromEntries(domains.map((d) => [`task-${d}`, sha256(domainTask(d, o.maxTurns))])) };
   // A submit summary is model text like any other, so it is redacted too.
   await writeFile(

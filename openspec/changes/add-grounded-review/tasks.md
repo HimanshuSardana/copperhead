@@ -36,3 +36,4 @@
 - [x] 5.7 Lockfile paths relative to the working directory; replay checks the bundle's hash; a pass whose provider cannot start writes its sample and its `pass ends` line
 - [x] 5.8 Tests for each, failing before the fix; a live one-domain run, its cancel, resume and byte-identical replay
 - [x] 5.9 Run every copperhead-tools call, replay included, in the review's working directory (copperhead-tools bundle version 2 names paths relative to it); live check a record written outside a repository, copied in, and replayed from its root
+- [x] 5.10 Second Codex review: a cancellation during the manifest lookup is still one; `--resume` keeps a pass only under the same model, templates and budgets; the time budget stops work in flight; the ending turn's sample records its outcome; a sample that cannot be saved ends the pass; a `propose` batch is checked whole; an empty `--domains` is refused
