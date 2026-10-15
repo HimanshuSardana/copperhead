@@ -130,34 +130,11 @@ export const STAGES: Stage[] = [
   {
     name: 'spec-seed',
     isComplete: async (root, docs) => {
-      // The init scaffold writes SPEC.md with a "## Budgets" heading and an
-      // HTML comment placeholder — that alone must not count as complete.
-      // Require the heading AND at least one non-comment, non-blank line
-      // of real budget content beneath it (a filled section vs. an empty placeholder).
       const p = path.join(root, docs, 'SPEC.md');
-      if (!existsSync(p)) return false;
-      const text = await readFile(p, 'utf8');
-      const heading = /^(#{1,6})\s.*\bBudgets?\b.*$/im.exec(text);
-      if (!heading) return false;
-      // The section runs to the next heading of the SAME OR SHALLOWER depth, not to
-      // the next heading of any depth (I17): a real spec routinely splits its budgets
-      // into subsections — "## 3. Electrical budgets" followed immediately by
-      // "### 3.1 Input and rails" — which leaves the parent's own body empty and read
-      // as an unfilled placeholder. Subheadings are part of the section, not its end.
-      const depth = heading[1]!.length;
-      const afterHeadingLine = text.slice(heading.index + heading[0].length);
-      const nextSection = afterHeadingLine.search(new RegExp(`^#{1,${depth}}\\s`, 'm'));
-      const section = nextSection >= 0 ? afterHeadingLine.slice(0, nextSection) : afterHeadingLine;
-      // Strip HTML comments (single or multi-line); headings inside the section are
-      // structure, not content, so a section of nothing but subheadings still fails.
-      const cleanSection = section.replace(/<!--[\s\S]*?-->/g, '');
-      const realLines = cleanSection
-        .split('\n')
-        .filter((l) => l.trim().length > 0 && !/^#{1,6}\s/.test(l.trim()));
-      return realLines.length > 0;
+      return existsSync(p) && !specBudgetsGap(await readFile(p, 'utf8'));
     },
     prompt: (brief) =>
-      `Stage 1 of the create pipeline: seed the requirements. From the product brief below, write docs/SPEC.md (what the device is, top-level constraints and budgets). Every budget you state must also be recorded with record_constraint. Anything the brief does not state: propose a sensible default and flag it ASSUMED. If an openspec/ workspace exists, also seed openspec/specs/ with per-capability requirements using Given/When/Then scenarios.\n\nBrief:\n${brief}`,
+      `Stage 1 of the create pipeline: seed the requirements. From the product brief below, write docs/SPEC.md (what the device is, top-level constraints, and a section headed "Budgets" that lists each budget; the stage is complete only when that heading has budgets under it). Every budget you state must also be recorded with record_constraint. Anything the brief does not state: propose a sensible default and flag it ASSUMED. If an openspec/ workspace exists, also seed openspec/specs/ with per-capability requirements using Given/When/Then scenarios.\n\nBrief:\n${brief}`,
   },
   {
     name: 'architecture',
@@ -493,6 +470,33 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
 }
 
 /**
+ * Why SPEC.md has no filled Budgets section, or null when it has one. The init
+ * scaffold writes SPEC.md with a "## Budgets" heading and an HTML comment
+ * placeholder, and that alone must not count: the heading needs at least one
+ * non-comment, non-blank line of real budget content beneath it. A model that
+ * rewrites the scaffold tends to retitle the section ("Budgeted Constraints"),
+ * which no longer names it, so the reason says the heading is what is looked for.
+ */
+export function specBudgetsGap(md: string): string | null {
+  const heading = /^(#{1,6})\s.*\bBudgets?\b.*$/im.exec(md);
+  if (!heading) return 'SPEC.md has no Budgets section; keep a heading named "Budgets" (as in "## Budgets") and list each budget under it';
+  // The section runs to the next heading of the SAME OR SHALLOWER depth, not to
+  // the next heading of any depth (I17): a real spec routinely splits its budgets
+  // into subsections — "## 3. Electrical budgets" followed immediately by
+  // "### 3.1 Input and rails" — which leaves the parent's own body empty and read
+  // as an unfilled placeholder. Subheadings are part of the section, not its end.
+  const depth = heading[1]!.length;
+  const afterHeadingLine = md.slice(heading.index + heading[0].length);
+  const nextSection = afterHeadingLine.search(new RegExp(`^#{1,${depth}}\\s`, 'm'));
+  const section = nextSection >= 0 ? afterHeadingLine.slice(0, nextSection) : afterHeadingLine;
+  // Strip HTML comments (single or multi-line); headings inside the section are
+  // structure, not content, so a section of nothing but subheadings still fails.
+  const cleanSection = section.replace(/<!--[\s\S]*?-->/g, '');
+  const realLines = cleanSection.split('\n').filter((l) => l.trim().length > 0 && !/^#{1,6}\s/.test(l.trim()));
+  return realLines.length > 0 ? null : `SPEC.md's Budgets section ("${heading[0].trim()}") holds no budgets; list each budget under it`;
+}
+
+/**
  * Why a BOM.md names no chosen part, or null when one row names one. `init`
  * scaffolds the table with UNVERIFIED in every MPN cell, so a part is chosen
  * when an MPN cell holds anything else. The flag for a part not yet checked
@@ -516,6 +520,12 @@ export function bomPartGap(md: string): string | null {
 
 async function contractGapDetail(stageName: string, root: string, config: CopperheadConfig): Promise<string> {
   const generic = 'the run finished but the stage completion contract is not met — no usable artifact was produced';
+  if (stageName === 'spec-seed') {
+    const spec = path.join(root, config.docs, 'SPEC.md');
+    if (!existsSync(spec)) return `the spec-seed contract is not met: ${path.join(config.docs, 'SPEC.md')} was not written`;
+    const gap = specBudgetsGap(await readFile(spec, 'utf8'));
+    if (gap) return `the spec-seed contract is not met: ${gap}`;
+  }
   if (stageName === 'part-selection') {
     const bom = path.join(root, config.docs, 'BOM.md');
     if (!existsSync(bom)) return `the part-selection contract is not met: ${path.join(config.docs, 'BOM.md')} was not written`;

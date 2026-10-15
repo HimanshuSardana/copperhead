@@ -12,7 +12,7 @@ import { describe, it, expect } from 'vitest';
 import path from 'node:path';
 import { mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
-import { STAGES, bomPartGap } from '../src/commands/create.js';
+import { STAGES, bomPartGap, specBudgetsGap } from '../src/commands/create.js';
 
 /** Return the isComplete function for the named stage (throws if not found). */
 function stageNamed(name: string) {
@@ -143,6 +143,20 @@ describe('spec-seed isComplete', () => {
       );
       expect(await stageNamed('spec-seed')(root, DOCS)).toBe(false);
     });
+  });
+});
+
+describe('specBudgetsGap names what SPEC.md is missing', () => {
+  it('a retitled section no longer names Budgets, and the reason says so', () => {
+    // what a run on a small hosted model wrote over the scaffold
+    const gap = specBudgetsGap('# Specification\n\n## Device\nA breakout.\n\n## Budgeted Constraints\n- Board layers: 2.\n');
+    expect(gap).toContain('no Budgets section');
+    expect(gap).toContain('"## Budgets"');
+  });
+
+  it("the scaffold's placeholder is an empty section, and a filled one is complete", () => {
+    expect(specBudgetsGap('# Spec\n\n## Budgets\n\n<!-- Add hard budgets here -->\n\n## Assumptions\n')).toContain('holds no budgets');
+    expect(specBudgetsGap('# Spec\n\n## Budgets\n\n- sleep_current_uA: 25\n')).toBeNull();
   });
 });
 
