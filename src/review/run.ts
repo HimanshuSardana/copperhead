@@ -11,7 +11,7 @@
  *
  * Nothing here writes the design: the design directory is an input, the record goes to --out.
  */
-import { copyFile, mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Provider } from '../agent/types.js';
 import { DOMAINS, digest, domainTask, sha256, systemPrompt, TEMPLATE_VERSION, RULES } from './prompts.js';
@@ -84,6 +84,29 @@ async function emptyOrAbsent(dir: string): Promise<boolean> {
   } catch {
     return true;
   }
+}
+
+/**
+ * Refuse a record that holds a symbolic link anywhere: a review writes only real files under the
+ * record, and a linked component (`model/samples` pointing into the design, say) would carry those
+ * writes into an input.
+ */
+async function refuseLinks(dir: string): Promise<void> {
+  const walk = async (d: string): Promise<void> => {
+    let names: string[];
+    try {
+      names = await readdir(d);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const p = path.join(d, name);
+      const st = await lstat(p);
+      if (st.isSymbolicLink()) throw new Error(`${dir} holds a symbolic link at ${path.relative(dir, p)}; a review record holds none, so nothing is written through it`);
+      if (st.isDirectory()) await walk(p);
+    }
+  };
+  await walk(dir);
 }
 
 /** Whether `dir` holds nothing but the empty `model/samples` a run creates before anything else. */
@@ -196,6 +219,7 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   };
   const inputsPath = path.join(out, 'inputs.json');
   if (o.resume) {
+    await refuseLinks(out);
     let text: string | null = null;
     try {
       text = await readFile(inputsPath, 'utf8');
@@ -377,6 +401,7 @@ export async function replayReview(record: string, o: ReplayOptions): Promise<{ 
   const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
   const bundlePath = path.join(dir, 'bundle.json');
   const proposalsPath = path.join(dir, 'model', 'proposals.json');
+  await refuseLinks(dir);
   if (sha256(await readFile(bundlePath, 'utf8')) !== lock.bundle.sha256) throw new Error('bundle.json differs from the lockfile: the bundle was changed');
   if (sha256(await readFile(proposalsPath, 'utf8')) !== lock.proposals.sha256) throw new Error('model/proposals.json differs from the lockfile: the stored samples were changed');
   const replayDir = path.join(dir, 'replay');

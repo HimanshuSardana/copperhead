@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -595,6 +595,14 @@ describe('review: the run and its record', () => {
     await expect(runReview({ ...base, resume: true, sources: ['docs'] })).rejects.toThrow(/--resume must name the record's inputs/);
     await unlink(path.join(out, 'inputs.json'));
     await expect(runReview({ ...base, resume: true })).rejects.toThrow(/holds no inputs\.json/);
+    // Nor does it write through a link a record should not hold.
+    await runReview({ ...base, out: 'linked' });
+    const linked = path.join(root, 'linked');
+    await rm(path.join(linked, 'model', 'samples'), { recursive: true });
+    await symlink(design, path.join(linked, 'model', 'samples'));
+    await expect(runReview({ ...base, out: 'linked', resume: true })).rejects.toThrow(/holds a symbolic link at model\/samples/);
+    await expect(replayReview(linked, { log: () => undefined, client: fakeTools() })).rejects.toThrow(/holds a symbolic link/);
+    expect(await readdir(design)).toEqual([]);
     // --resume does not make an unrelated directory a record.
     await mkdir(path.join(root, 'notes'));
     await writeFile(path.join(root, 'notes', 'todo.txt'), 'x');
