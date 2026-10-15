@@ -428,12 +428,13 @@ async function bomFootprintMisses(
 
 /**
  * A miss the model can fix in BOM.md: a mistyped or invented name, a
- * non-id cell, an unassigned footprint, or a library nickname whose footprint
- * is installed under another library by that exact name. A library that is
+ * non-id cell, an unassigned footprint, a symbol's lib_id written as the
+ * footprint, or a library nickname whose footprint is installed under another
+ * library by that exact name. A library that is
  * simply not installed is the user's to install, and stops the run; the
  * ranked guesses a miss may carry (`fuzzy`) are shown there, not acted on.
  */
-const modelFixable = (m: MissingFootprint): boolean => m.why !== 'no-library' || (m.near.length > 0 && !m.fuzzy);
+const modelFixable = (m: MissingFootprint): boolean => !!m.symbol || m.why !== 'no-library' || (m.near.length > 0 && !m.fuzzy);
 
 async function bomFootprintStop(root: string, config: CopperheadConfig): Promise<string | null> {
   const r = await bomFootprintMisses(root, config.docs);
@@ -513,7 +514,13 @@ async function contractGapDetail(stageName: string, root: string, config: Copper
     if (fixable.length) {
       return (
         `the part-selection contract is not met: ${fixable.length} BOM.md footprint(s) do not resolve to an installed footprint — ` +
-        fixable.map((m) => `${m.ref} ${m.footprint || '(none)'}${m.near.length ? ` (installed: ${m.near.slice(0, 3).join(', ')})` : ''}`).join('; ') +
+        fixable
+          .map(
+            (m) =>
+              `${m.ref} ${m.footprint || '(none)'}${m.symbol ? ' is a symbol id, not a footprint id' : ''}` +
+              (m.near.length ? ` (${m.symbol ? 'footprints it accepts' : 'installed'}: ${m.near.slice(0, 3).join(', ')})` : ''),
+          )
+          .join('; ') +
         '; call check_footprints on every Footprint cell and use exact installed ids'
       );
     }
