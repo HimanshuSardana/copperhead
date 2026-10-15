@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
+import { setMaxListeners } from 'node:events';
 import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline/promises';
 import { loadConfig, resolveModel, type ModelSource } from './config.js';
@@ -425,6 +426,11 @@ program
   .option('--tools <path>', 'copperhead-tools cli.js or executable (default: COPPERHEAD_TOOLS, then PATH)')
   .option('--replay <dir>', 're-verify a recorded review with no model and compare its report byte for byte')
   .option('--resume', 'continue the record in --out that a killed run left: keep its sweep, bundle and ended passes')
+  .addHelpText(
+    'after',
+    '\nExit codes: 0 every pass ended and the report was written; 2 the report was written but a pass failed\n' +
+      '(rerun it with --resume); 1 an error, or a replay that differs; 130 or 143 cancelled by SIGINT or SIGTERM.',
+  )
   .action(
     async (
       designArg: string | undefined,
@@ -432,10 +438,25 @@ program
     ) => {
       const json = Boolean(program.opts().json);
       const log = (line: string) => console.error(line);
+      // Cancelling stops the passes and the copperhead-tools processes, keeps every sample saved so
+      // far (a later --resume reruns the interrupted passes), and exits 128 + the signal number.
+      const cancel = new AbortController();
+      // Every pass and copperhead-tools process listens on it; --parallel 8 passes more than the default ten.
+      setMaxListeners(0, cancel.signal);
+      let cancelCode = 0;
+      const onSignal = (sig: NodeJS.Signals) => {
+        if (cancelCode) process.exit(cancelCode);
+        cancelCode = sig === 'SIGINT' ? 130 : 143;
+        console.error(`review: ${sig}: cancelling`);
+        cancel.abort();
+        setTimeout(() => process.exit(cancelCode), 10_000).unref();
+      };
+      process.on('SIGINT', onSignal);
+      process.on('SIGTERM', onSignal);
       try {
         const { runReview, replayReview } = await import('./review/run.js');
         if (opts.replay) {
-          const r = await replayReview(opts.replay, opts.tools, log);
+          const r = await replayReview(opts.replay, opts.tools, log, undefined, cancel.signal);
           if (json) console.log(JSON.stringify(r, null, 2));
           else console.log(r.identical ? `replay identical: ${r.replayReport}` : `replay DIFFERS: compare ${r.report} with ${r.replayReport}`);
           process.exit(r.identical ? 0 : 1);
@@ -463,6 +484,7 @@ program
           // A review pass resumes one provider session and sends only the new messages each turn.
           makeProvider: (m) => makeProvider(m, true),
           log,
+          signal: cancel.signal,
         });
         if (json) console.log(JSON.stringify(res, null, 2));
         else {
@@ -470,10 +492,12 @@ program
           console.log(`verification: ${JSON.stringify(res.summary)}`);
           for (const p of res.passes) console.log(`  ${p.domain}: ${p.outcome}, ${p.turns} turns, ${p.proposals} proposals, ${p.seconds} s${p.error ? ` (${p.error})` : ''}`);
         }
-        process.exit(0);
+        const failed = res.passes.filter((p) => p.outcome === 'failed').map((p) => p.domain);
+        if (failed.length) console.error(`review: ${failed.length} pass(es) failed (${failed.join(', ')}); the report covers the rest. Rerun them with --resume.`);
+        process.exit(failed.length ? 2 : 0);
       } catch (err) {
         console.error((err as Error).message);
-        process.exit(1);
+        process.exit(cancelCode || 1);
       }
     },
   );

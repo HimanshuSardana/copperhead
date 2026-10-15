@@ -6,7 +6,9 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import type { Msg, Provider, ToolCall, ToolSchema } from '../agent/types.js';
+import { TurnTimeoutError, withWatchdog } from '../agent/recovery.js';
+import type { Msg, Provider, ToolCall, ToolSchema, Turn } from '../agent/types.js';
+import { isRateLimit, withRetry } from '../util/retry.js';
 import type { ToolsClient } from './tools-client.js';
 
 const MAX_RESULT_CHARS = 16_000;
@@ -70,10 +72,24 @@ export interface PassOptions {
   task: string;
   maxTurns: number;
   maxSeconds: number;
+  /** A turn with no response or progress for this long is aborted and retried once. */
   turnTimeoutMs: number;
+  /** A turn still producing output after this long is stopped and ends the pass (default 3 x turnTimeoutMs). */
+  turnMaxMs?: number;
+  /** First backoff after a rate limit (429); doubled for each of three retries. */
+  rateLimitBaseMs?: number;
   log: (line: string) => void;
   /** Called after every turn with the record so far, so a pass that is killed leaves its work. */
   onTurn?: (rec: PassRecord) => Promise<void>;
+  /** Aborting it stops the pass: the in-flight turn is torn down and the pass ends `failed`, error `cancelled`. */
+  signal?: AbortSignal;
+}
+
+export class CancelledError extends Error {
+  constructor() {
+    super('cancelled');
+    this.name = 'CancelledError';
+  }
 }
 
 /** Prefix a pass's ids with its domain, so proposals of different passes never collide. */
@@ -102,21 +118,33 @@ function clip(text: string): string {
   return text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n... (cut at ${MAX_RESULT_CHARS} characters; narrow the query)` : text;
 }
 
-async function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      p,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          onTimeout();
-          reject(new Error(`turn exceeded ${Math.round(ms / 1000)} s`));
-        }, ms);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
+/** Settle with `p`, or reject with CancelledError as soon as `signal` aborts (after running `onAbort`). */
+async function untilAborted<T>(p: Promise<T>, signal: AbortSignal | undefined, onAbort: () => unknown): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) {
+    void Promise.resolve(onAbort()).catch(() => undefined);
+    p.catch(() => undefined);
+    throw new CancelledError();
   }
+  let listener: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    listener = () => {
+      reject(new CancelledError());
+      void Promise.resolve(onAbort()).catch(() => undefined);
+    };
+    signal.addEventListener('abort', listener, { once: true });
+  });
+  try {
+    return await Promise.race([p, aborted]);
+  } finally {
+    signal.removeEventListener('abort', listener!);
+  }
+}
+
+/** A delay that ends early, rejecting with CancelledError, when `signal` aborts. */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  return untilAborted(new Promise<void>((r) => (timer = setTimeout(r, ms))), signal, () => clearTimeout(timer));
 }
 
 export async function runPass(o: PassOptions): Promise<PassRecord> {
@@ -145,8 +173,42 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
   let idle = 0;
   let timeouts = 0;
   let warned = false;
+  // The sample is saved at the end of every turn, whichever way the turn ends, so a pass that is
+  // killed leaves every turn it had taken (design D5).
+  const checkpoint = async () => {
+    if (!o.onTurn) return;
+    rec.proposals = [...proposals.values()];
+    rec.seconds = Math.round((Date.now() - started) / 1000);
+    rec.transcript = transcriptOf(messages);
+    await o.onTurn(rec).catch(() => undefined);
+  };
+  const close = () => o.provider.close?.();
+  // One provider turn: an inactivity watchdog (a turn that keeps streaming is not hung) with a
+  // hard cap, rate limits retried with backoff, and cancellation that tears the turn down.
+  const chat = (turn: number): Promise<Turn> =>
+    untilAborted(
+      withRetry(
+        () => {
+          if (o.signal?.aborted) throw new CancelledError();
+          return withWatchdog((activity) => o.provider.chat(messages, PASS_TOOLS, { onStream: () => activity() }), {
+            idleMs: o.turnTimeoutMs,
+            maxMs: o.turnMaxMs ?? 3 * o.turnTimeoutMs,
+            onTimeout: close,
+          });
+        },
+        {
+          baseMs: o.rateLimitBaseMs ?? 5000,
+          isRetryable: isRateLimit,
+          onRetry: (attempt) => o.log(`[${o.domain}] turn ${turn}: rate limited; retry ${attempt} of 3`),
+          sleep: (ms) => delay(ms, o.signal),
+        },
+      ),
+      o.signal,
+      close,
+    );
   try {
     for (let turn = 1; turn <= o.maxTurns; turn++) {
+      if (o.signal?.aborted) throw new CancelledError();
       if ((Date.now() - started) / 1000 > o.maxSeconds) {
         rec.outcome = 'time-exhausted';
         break;
@@ -156,14 +218,17 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
         messages.push({ role: 'user', content: `${o.maxTurns - turn + 1} turns left. Propose your remaining findings with their premises now, then call submit.` });
       }
       rec.turns = turn;
-      let reply;
+      let reply: Turn;
       try {
-        reply = await withTimeout(o.provider.chat(messages, PASS_TOOLS), o.turnTimeoutMs, () => void o.provider.close?.());
+        reply = await chat(turn);
       } catch (e) {
-        // A turn that runs past its timeout is retried once; two in a row end the pass.
-        if (!/turn exceeded/.test((e as Error).message) || ++timeouts >= 2) throw e;
-        rec.calls.push({ turn, tool: '(timeout)', args: {}, result: (e as Error).message, ms: o.turnTimeoutMs });
+        // A turn with no response or progress past its timeout is retried once; two in a row end
+        // the pass. A turn still producing output at the hard cap is too large, not hung: it ends
+        // the pass at once, since resending it would run just as long.
+        if (!(e instanceof TurnTimeoutError) || e.kind === 'max' || ++timeouts >= 2) throw e;
+        rec.calls.push({ turn, tool: '(timeout)', args: {}, result: e.message, ms: e.ms });
         o.log(`[${o.domain}] turn ${turn}: timed out; retrying`);
+        await checkpoint();
         continue;
       }
       timeouts = 0;
@@ -176,6 +241,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
           break;
         }
         messages.push({ role: 'user', content: reply.nudge ?? 'Reply with exactly one tool call: a query, propose, or submit.' });
+        await checkpoint();
         continue;
       }
       idle = 0;
@@ -195,7 +261,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
           else {
             const args = { ...call.args, ...(q.preset ?? {}) };
             try {
-              const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) });
+              const r = await o.tools.run('review-query', { bundle: o.bundlePath, op: q.op, args: JSON.stringify(args) }, o.signal ? { signal: o.signal } : {});
               const d = r.data as { ok?: boolean; text?: string; problem?: string } | undefined;
               result = d?.ok ? (d.text ?? '') : `Problem: ${d?.problem ?? 'no result'}`;
               if (!d?.ok && !Object.keys(call.args).length && (q.required ?? []).length) {
@@ -213,12 +279,7 @@ export async function runPass(o: PassOptions): Promise<PassRecord> {
         if (done) break;
       }
       if (reply.notice) messages.push({ role: 'user', content: reply.notice });
-      if (o.onTurn) {
-        rec.proposals = [...proposals.values()];
-        rec.seconds = Math.round((Date.now() - started) / 1000);
-        rec.transcript = transcriptOf(messages);
-        await o.onTurn(rec).catch(() => undefined);
-      }
+      await checkpoint();
       if (done) {
         rec.outcome = 'submitted';
         break;
@@ -256,7 +317,7 @@ async function propose(o: PassOptions, args: Record<string, unknown>, held: Map<
   const file = path.join(scratch, 'proposals.json');
   await writeFile(file, JSON.stringify({ format: 'copperhead-review-proposals', version: 1, proposals: [...held.values()] }));
   try {
-    const r = await o.tools.run('review-verify', { bundle: o.bundlePath, proposals: file });
+    const r = await o.tools.run('review-verify', { bundle: o.bundlePath, proposals: file }, o.signal ? { signal: o.signal } : {});
     const vs = ((r.data as { verifications?: { id: string; outcome: string; class: string | null; verifier: string; reason: string; claim: string | null; severity?: string; severityNote?: string }[] }).verifications ?? []);
     const byId = new Map(vs.map((v) => [v.id, v]));
     return ids

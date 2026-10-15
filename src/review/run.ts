@@ -11,11 +11,11 @@
  *
  * Nothing here writes the design: the design directory is an input, the record goes to --out.
  */
-import { copyFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Provider } from '../agent/types.js';
 import { DOMAINS, digest, domainTask, sha256, systemPrompt, TEMPLATE_VERSION, RULES } from './prompts.js';
-import { type PassRecord, PASS_TOOLS, runPass } from './pass.js';
+import { CancelledError, type PassRecord, PASS_TOOLS, runPass } from './pass.js';
 import { resolveTools, type ToolsClient } from './tools-client.js';
 import { redactSecrets } from '../util/redact.js';
 
@@ -40,7 +40,22 @@ export interface ReviewOptions {
   /** A copperhead-tools client to use instead of resolving one (tests). */
   client?: ToolsClient;
   makeProvider: (model: string) => Promise<Provider>;
+  /**
+   * Progress, one line per call, redacted. These formats are an interface (an editor extension
+   * parses them); change them only with the test that pins them:
+   *   sweep: <json summary>                     after the sweep ran, or
+   *   sweep: using the record at <dir>          with --sweep
+   *   bundle: <json summary>                    after the bundle was built
+   *   [<domain>] pass starts (<title>)
+   *   [<domain>] turn <n>: <tool> <args or "(<n> held)">
+   *   [<domain>] pass ends: <outcome> after <n> turns, <n> proposals, <n> s[ (<error>)]
+   *   [<domain>] resume: keeping the pass that ended <outcome> after <n> turns
+   */
   log: (line: string) => void;
+  /** Paths given relative resolve against it, and the lockfile records paths inside it relative to it (default: the process's cwd). */
+  cwd?: string;
+  /** Aborting it stops the run: passes are torn down, copperhead-tools processes stopped, and the run rejects with CancelledError. */
+  signal?: AbortSignal;
 }
 
 export interface ReviewOutcome {
@@ -70,6 +85,33 @@ async function emptyOrAbsent(dir: string): Promise<boolean> {
   }
 }
 
+/** The real path of `p`, through symbolic links, for a path whose tail does not exist yet too. */
+async function canonical(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    const parent = path.dirname(p);
+    return parent === p ? p : path.join(await canonical(parent), path.basename(p));
+  }
+}
+
+/** Whether `child` is `parent` or lies under it (lexically: canonicalize first where links matter). */
+function within(child: string, parent: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+}
+
+/** Written whole or not at all: a run killed mid-write leaves the previous sample, never a truncated one. */
+async function writeAtomic(file: string, text: string): Promise<void> {
+  const tmp = `${file}.tmp-${process.pid}`;
+  await writeFile(tmp, text);
+  await rename(tmp, file);
+}
+
+function positive(name: string, v: number, integer: boolean): void {
+  if (!Number.isFinite(v) || v <= 0 || (integer && !Number.isInteger(v))) throw new Error(`${name} must be a positive ${integer ? 'whole number' : 'number'}, not ${v}`);
+}
+
 async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
   const out: R[] = new Array(items.length);
   let next = 0;
@@ -84,109 +126,147 @@ async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Prom
   return out;
 }
 
-async function verify(tools: ToolsClient, bundle: string, proposals: string, outDir: string): Promise<Record<string, unknown>> {
-  const r = await tools.run('review-verify', { bundle, proposals, out: outDir });
+async function verify(tools: ToolsClient, bundle: string, proposals: string, outDir: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const r = await tools.run('review-verify', { bundle, proposals, out: outDir }, signal ? { signal } : {});
   return r.summary ?? {};
 }
 
+async function parses(file: string): Promise<boolean> {
+  try {
+    JSON.parse(await readFile(file, 'utf8'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
-  const out = path.resolve(o.out);
-  const design = path.resolve(o.design);
+  const cwd = path.resolve(o.cwd ?? process.cwd());
+  const abs = (p: string) => path.resolve(cwd, p);
+  // The record is committed beside the design, so it names a path inside the working directory
+  // relative to it: no home directory in it, and the same bytes on every machine.
+  const shown = (p: string) => (within(p, cwd) ? path.relative(cwd, p).split(path.sep).join('/') || '.' : p);
+  const log = (line: string) => o.log(redactSecrets(line));
+  const out = abs(o.out);
+  const design = abs(o.design);
+  const fab = (o.fab ?? []).map(abs);
+  const domains = [...new Set(o.domains)];
+  for (const d of domains) if (!DOMAINS[d]) throw new Error(`unknown domain "${d}"; domains are ${Object.keys(DOMAINS).join(', ')}`);
+  positive('--max-turns', o.maxTurns, true);
+  positive('--max-minutes', o.maxMinutes, false);
+  positive('--parallel', o.parallel, true);
   if (!o.resume && !(await emptyOrAbsent(out))) throw new Error(`--out ${out} is not empty; give a new directory for the review record, or --resume it`);
-  const rel = path.relative(design, out);
-  if (!rel.startsWith('..') && !path.isAbsolute(rel)) throw new Error('--out must lie outside the design directory: a review never writes into the design');
-  for (const d of o.domains) if (!DOMAINS[d]) throw new Error(`unknown domain "${d}"; domains are ${Object.keys(DOMAINS).join(', ')}`);
+  // Compared through symbolic links: a link outside the design that points into it is inside it.
+  const realOut = await canonical(out);
+  if (within(realOut, await canonical(design))) throw new Error('--out must lie outside the design directory: a review never writes into the design');
+  for (const input of [...o.sources.map(abs), ...fab]) {
+    if (within(realOut, await canonical(input))) throw new Error(`--out must lie outside every input; it is inside ${input}`);
+  }
   await mkdir(path.join(out, 'model', 'samples'), { recursive: true });
   const tools = o.client ?? (await resolveTools(o.tools));
+  const signal = o.signal;
+  const sig = signal ? { signal } : {};
   const started = new Date();
 
-  const resumable = o.resume && (await exists(path.join(out, 'bundle.json')));
-  if (o.resume && !resumable) o.log('resume: no bundle in the record; starting from the sweep');
+  // A bundle a killed run left half-written is rebuilt; no pass can have read it.
+  const resumable = o.resume && (await parses(path.join(out, 'bundle.json')));
+  if (o.resume && !resumable) log('resume: no bundle in the record; starting from the sweep');
 
   // 1. sweep
   let sweepDir: string;
   if (resumable) {
-    sweepDir = (await exists(path.join(out, 'sweep', 'review.json'))) ? path.join(out, 'sweep') : path.resolve(o.sweep ?? path.join(out, 'sweep'));
-    o.log(`resume: reusing the sweep at ${sweepDir}`);
+    sweepDir = (await exists(path.join(out, 'sweep', 'review.json'))) ? path.join(out, 'sweep') : abs(o.sweep ?? path.join(out, 'sweep'));
+    log(`resume: reusing the sweep at ${sweepDir}`);
   } else if (o.sweep) {
-    sweepDir = path.resolve(o.sweep);
-    o.log(`sweep: using the record at ${sweepDir}`);
+    sweepDir = abs(o.sweep);
+    log(`sweep: using the record at ${sweepDir}`);
   } else {
     sweepDir = path.join(out, 'sweep');
-    o.log('sweep: copperhead-tools review (every applicable deterministic check)');
-    const fab = (o.fab ?? []).map((f) => path.resolve(f));
-    const r = await tools.run('review', { input: [design, ...fab], 'out-dir': sweepDir, ...(o.fabProfile ? { profile: path.resolve(o.fabProfile) } : {}) });
-    o.log(`sweep: ${JSON.stringify(r.summary)}`);
+    log('sweep: copperhead-tools review (every applicable deterministic check)');
+    const r = await tools.run('review', { input: [design, ...fab], 'out-dir': sweepDir, ...(o.fabProfile ? { profile: abs(o.fabProfile) } : {}) }, sig);
+    log(`sweep: ${JSON.stringify(r.summary)}`);
   }
 
   // 2. bundle
   const bundlePath = path.join(out, 'bundle.json');
-  const sources = [...o.sources, ...(o.fab ?? [])].map((s) => path.resolve(s));
-  let bundleSha: string;
-  if (resumable) {
-    bundleSha = sha256(await readFile(bundlePath, 'utf8'));
-    o.log(`resume: reusing the bundle (sha256 ${bundleSha.slice(0, 12)})`);
-  } else {
-    const b = await tools.run('review-bundle', { drop: design, sweep: sweepDir, sources, ...(o.label ? { label: o.label } : {}), out: bundlePath });
-    bundleSha = String((b.data as { sha256?: string }).sha256 ?? '');
-    o.log(`bundle: ${JSON.stringify(b.summary)}`);
+  const sources = [...o.sources.map(abs), ...fab];
+  if (!resumable) {
+    const b = await tools.run('review-bundle', { drop: design, sweep: sweepDir, sources, ...(o.label ? { label: o.label } : {}), out: bundlePath }, sig);
+    log(`bundle: ${JSON.stringify(b.summary)}`);
   }
-  const bundle = JSON.parse(await readFile(bundlePath, 'utf8')) as Parameters<typeof digest>[0];
+  // Hashed from the bytes on disk, the bytes every query, verification and replay reads.
+  const bundleText = await readFile(bundlePath, 'utf8');
+  const bundleSha = sha256(bundleText);
+  if (resumable) log(`resume: reusing the bundle (sha256 ${bundleSha.slice(0, 12)})`);
+  const bundle = JSON.parse(bundleText) as Parameters<typeof digest>[0];
   const system = systemPrompt(digest(bundle));
 
   // 3. passes
-  const passes: PassRecord[] = await pool(o.domains, o.parallel, async (domain) => {
+  const passes: (PassRecord | null)[] = await pool(domains, o.parallel, async (domain) => {
+    if (signal?.aborted) return null;
     const sample = path.join(out, 'model', 'samples', `${domain}.json`);
     if (resumable && (await exists(sample))) {
-      const prior = JSON.parse(await readFile(sample, 'utf8')) as PassRecord;
-      if (ENDED.has(prior.outcome) && prior.turns > 0) {
-        o.log(`[${domain}] resume: keeping the pass that ended ${prior.outcome} after ${prior.turns} turns`);
+      let prior: PassRecord | null = null;
+      try {
+        prior = JSON.parse(await readFile(sample, 'utf8')) as PassRecord;
+      } catch {
+        // unreadable: the pass is rerun, and the file kept aside below
+      }
+      if (prior && ENDED.has(prior.outcome) && prior.turns > 0) {
+        log(`[${domain}] resume: keeping the pass that ended ${prior.outcome} after ${prior.turns} turns`);
         return prior;
       }
       await copyFile(sample, `${sample}.interrupted-${Date.now()}`);
     }
-    o.log(`[${domain}] pass starts (${DOMAINS[domain]!.title})`);
+    // Samples hold model text and tool results, so they are redacted at write time like transcripts (AC-4.1).
+    const save = (r: PassRecord) => writeAtomic(sample, redactSecrets(`${JSON.stringify(r, null, 1)}\n`));
+    const ends = (r: PassRecord) => log(`[${domain}] pass ends: ${r.outcome} after ${r.turns} turns, ${r.proposals.length} proposals, ${r.seconds} s${r.error ? ` (${r.error})` : ''}`);
+    log(`[${domain}] pass starts (${DOMAINS[domain]!.title})`);
     let provider: Provider;
     try {
       provider = await o.makeProvider(o.model);
     } catch (e) {
-      return { domain, model: o.model, turns: 0, outcome: 'failed', error: (e as Error).message, inputTokens: 0, outputTokens: 0, startedAt: new Date().toISOString(), seconds: 0, proposals: [], calls: [], transcript: [], summary: null } satisfies PassRecord;
+      const failed = { domain, model: o.model, turns: 0, outcome: 'failed', error: (e as Error).message, inputTokens: 0, outputTokens: 0, startedAt: new Date().toISOString(), seconds: 0, proposals: [], calls: [], transcript: [], summary: null } satisfies PassRecord;
+      await save(failed);
+      ends(failed);
+      return failed;
     }
-    // Samples hold model text and tool results, so they are redacted at write time like transcripts (AC-4.1).
-    const save = (r: PassRecord) => writeFile(sample, redactSecrets(`${JSON.stringify(r, null, 1)}\n`));
-    const rec = await runPass({ domain, model: o.model, provider, tools, bundlePath, system, task: domainTask(domain, o.maxTurns), maxTurns: o.maxTurns, maxSeconds: o.maxMinutes * 60, turnTimeoutMs: 10 * 60_000, log: o.log, onTurn: save });
+    const rec = await runPass({ domain, model: o.model, provider, tools, bundlePath, system, task: domainTask(domain, o.maxTurns), maxTurns: o.maxTurns, maxSeconds: o.maxMinutes * 60, turnTimeoutMs: 10 * 60_000, log, onTurn: save, ...sig });
     await save(rec);
-    o.log(`[${domain}] pass ends: ${rec.outcome} after ${rec.turns} turns, ${rec.proposals.length} proposals, ${rec.seconds} s${rec.error ? ` (${rec.error})` : ''}`);
+    ends(rec);
     return rec;
   });
+  if (signal?.aborted) throw new CancelledError();
+  const ran = passes.filter((p): p is PassRecord => p !== null);
 
   // 4. verify
-  const proposals = passes.flatMap((p) => p.proposals);
+  const proposals = ran.flatMap((p) => p.proposals);
   const proposalsPath = path.join(out, 'model', 'proposals.json');
   await writeFile(proposalsPath, redactSecrets(`${JSON.stringify({ format: 'copperhead-review-proposals', version: 1, proposals }, null, 1)}\n`));
-  const summary = await verify(tools, bundlePath, proposalsPath, path.join(out, 'verify'));
+  const summary = await verify(tools, bundlePath, proposalsPath, path.join(out, 'verify'), signal);
   await copyFile(path.join(out, 'verify', 'report.md'), path.join(out, 'report.md'));
 
   // 5. record
-  const toolsManifest = await tools.run('review-query', { bundle: bundlePath, op: 'calculators' }).then((r) => r.package ?? null).catch(() => null);
-  const templates = { rules: sha256(RULES), tools: sha256(JSON.stringify(PASS_TOOLS)), ...Object.fromEntries(o.domains.map((d) => [`task-${d}`, sha256(domainTask(d, o.maxTurns))])) };
+  const toolsManifest = await tools.run('review-query', { bundle: bundlePath, op: 'calculators' }, sig).then((r) => r.package ?? null).catch(() => null);
+  const templates = { rules: sha256(RULES), tools: sha256(JSON.stringify(PASS_TOOLS)), ...Object.fromEntries(domains.map((d) => [`task-${d}`, sha256(domainTask(d, o.maxTurns))])) };
+  // A submit summary is model text like any other, so it is redacted too.
   await writeFile(
     path.join(out, 'model', 'passes.json'),
-    `${JSON.stringify(passes.map((p) => ({ domain: p.domain, model: p.model, outcome: p.outcome, error: p.error, turns: p.turns, proposals: p.proposals.length, inputTokens: p.inputTokens, outputTokens: p.outputTokens, startedAt: p.startedAt, seconds: p.seconds, summary: p.summary })), null, 1)}\n`,
+    redactSecrets(`${JSON.stringify(ran.map((p) => ({ domain: p.domain, model: p.model, outcome: p.outcome, error: p.error, turns: p.turns, proposals: p.proposals.length, inputTokens: p.inputTokens, outputTokens: p.outputTokens, startedAt: p.startedAt, seconds: p.seconds, summary: p.summary })), null, 1)}\n`),
   );
   const lock = {
     format: 'copperhead-review-lock',
     version: 1,
     startedAt: started.toISOString(),
-    design: design,
+    design: shown(design),
     bundle: { path: 'bundle.json', sha256: bundleSha },
-    sweep: path.relative(out, sweepDir).startsWith('..') ? sweepDir : path.relative(out, sweepDir),
-    tools: { command: tools.command, package: toolsManifest },
+    sweep: within(sweepDir, out) ? path.relative(out, sweepDir).split(path.sep).join('/') : shown(sweepDir),
+    tools: { command: tools.command.map((c) => (path.isAbsolute(c) ? shown(c) : c)), package: toolsManifest },
     model: { id: o.model, decoding: 'provider default (not pinnable through this provider)', samplesPerPass: 1 },
     templates: { version: TEMPLATE_VERSION, sha256: templates },
-    domains: o.domains,
-    fab: (o.fab ?? []).map((f) => path.resolve(f)),
-    fabProfile: o.fabProfile ? path.resolve(o.fabProfile) : null,
+    domains,
+    fab: fab.map(shown),
+    fabProfile: o.fabProfile ? shown(abs(o.fabProfile)) : null,
     budgets: { maxTurns: o.maxTurns, maxMinutes: o.maxMinutes, parallel: o.parallel },
     proposals: { path: 'model/proposals.json', sha256: sha256(await readFile(proposalsPath, 'utf8')) },
     report: { path: 'report.md', sha256: sha256(await readFile(path.join(out, 'report.md'), 'utf8')) },
@@ -196,22 +276,23 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
     out,
     report: path.join(out, 'report.md'),
     summary,
-    passes: passes.map((p) => ({ domain: p.domain, outcome: p.outcome, turns: p.turns, proposals: p.proposals.length, seconds: p.seconds, error: p.error })),
+    passes: ran.map((p) => ({ domain: p.domain, outcome: p.outcome, turns: p.turns, proposals: p.proposals.length, seconds: p.seconds, error: p.error })),
   };
 }
 
 /** Re-verify a record's stored samples with no model, and compare the report with the recorded one. */
-export async function replayReview(record: string, toolsFlag: string | undefined, log: (line: string) => void, client?: ToolsClient): Promise<{ identical: boolean; report: string; replayReport: string }> {
+export async function replayReview(record: string, toolsFlag: string | undefined, log: (line: string) => void, client?: ToolsClient, signal?: AbortSignal): Promise<{ identical: boolean; report: string; replayReport: string }> {
   const dir = path.resolve(record);
   const lock = JSON.parse(await readFile(path.join(dir, 'review.lock.json'), 'utf8')) as { bundle: { sha256: string }; proposals: { sha256: string }; report: { sha256: string } };
   const tools = client ?? (await resolveTools(toolsFlag));
   const bundlePath = path.join(dir, 'bundle.json');
   const proposalsPath = path.join(dir, 'model', 'proposals.json');
+  if (sha256(await readFile(bundlePath, 'utf8')) !== lock.bundle.sha256) throw new Error('bundle.json differs from the lockfile: the bundle was changed');
   if (sha256(await readFile(proposalsPath, 'utf8')) !== lock.proposals.sha256) throw new Error('model/proposals.json differs from the lockfile: the stored samples were changed');
   const replayDir = path.join(dir, 'replay');
   await mkdir(replayDir, { recursive: true });
   log('replay: re-verifying the stored samples (no model)');
-  await verify(tools, bundlePath, proposalsPath, replayDir);
+  await verify(tools, bundlePath, proposalsPath, replayDir, signal);
   const a = await readFile(path.join(dir, 'report.md'), 'utf8');
   const b = await readFile(path.join(replayDir, 'report.md'), 'utf8');
   return { identical: a === b && sha256(b) === lock.report.sha256, report: path.join(dir, 'report.md'), replayReport: path.join(replayDir, 'report.md') };

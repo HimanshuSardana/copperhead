@@ -21,7 +21,8 @@ export class ToolsError extends Error {}
 export interface ToolsClient {
   /** How the tools were found, for the record. */
   readonly command: string[];
-  run(tool: string, inputs: Record<string, unknown>, opts?: { cwd?: string; env?: Record<string, string> }): Promise<ToolsResult>;
+  /** An aborted `signal` stops the tool's process (SIGTERM) and rejects with "cancelled". */
+  run(tool: string, inputs: Record<string, unknown>, opts?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal }): Promise<ToolsResult>;
 }
 
 /** `--tools`, then COPPERHEAD_TOOLS (a cli.js or an executable), then `copperhead-tools` on PATH. */
@@ -43,17 +44,30 @@ export async function resolveTools(flag?: string, env = process.env): Promise<To
     command,
     run(tool, inputs, opts = {}) {
       return new Promise((resolve, reject) => {
+        if (opts.signal?.aborted) {
+          reject(new ToolsError(`copperhead-tools ${tool}: cancelled`));
+          return;
+        }
         const child = spawn(command[0]!, [...command.slice(1), 'run', tool], {
           cwd: opts.cwd ?? process.cwd(),
           env: { ...process.env, ...(opts.env ?? {}) },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
+        // A cancelled review must not leave a sweep running: stop the child and settle now.
+        const onAbort = () => {
+          child.kill('SIGTERM');
+          reject(new ToolsError(`copperhead-tools ${tool}: cancelled`));
+        };
+        opts.signal?.addEventListener('abort', onAbort, { once: true });
         let out = '';
         let err = '';
         child.stdout.on('data', (d: Buffer) => (out += d.toString()));
         child.stderr.on('data', (d: Buffer) => (err += d.toString()));
+        // A child that died before reading its request must not crash the review with EPIPE.
+        child.stdin.on('error', () => undefined);
         child.on('error', (e) => reject(new ToolsError(`cannot start copperhead-tools (${command.join(' ')}): ${e.message}`)));
         child.on('close', (code) => {
+          opts.signal?.removeEventListener('abort', onAbort);
           let result: ToolsResult;
           try {
             result = JSON.parse(out) as ToolsResult;

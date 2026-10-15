@@ -136,6 +136,17 @@ function detectMalformedCall(text: string, catalog: Set<string>): string | undef
       `missing from the build. Available this turn: ${[...catalog].join(', ')}.`
     );
   }
+  // A native function-call block instead of the JSON protocol. Some models fall back to it from
+  // habit, turn after turn; a plain "call a tool" nudge gets one JSON call before the habit
+  // returns, so say what was wrong with the call.
+  const invoke = /<(?:[a-z]+:)?invoke\s+name="([^"]+)"/.exec(text);
+  if (invoke && catalog.has(invoke[1]!)) {
+    return (
+      `No call ran: the call to "${invoke[1]}" was written as an <invoke> block, which this ` +
+      'protocol does not read. Write every call as one JSON object in a ```json block: ' +
+      `{"tool": "${invoke[1]}", "args": { ... }}.`
+    );
+  }
   return undefined;
 }
 
