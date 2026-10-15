@@ -24,7 +24,7 @@ import { runAgentLoop, type BudgetExhaustedStats } from './agent/loop.js';
 import { makeRenderer } from './agent/render.js';
 import { kicadCliVersion } from './kicad/cli.js';
 import { loadEnvFile } from './util/env.js';
-import { budgetExtraTurns, budgetPromptText, parseMaxTurns, repoOf } from './util/cli-args.js';
+import { budgetExtraTurns, budgetPromptText, parseMaxTurns, repoOf, reviewProviderFactory } from './util/cli-args.js';
 
 // Read .env from the working directory before any command resolves a model or a
 // provider. Loaded here rather than per-command so `check` behaves identically,
@@ -482,8 +482,7 @@ program
           ...(opts.fabProfile ? { fabProfile: opts.fabProfile } : {}),
           ...(opts.resume ? { resume: true } : {}),
           ...(opts.tools ? { tools: opts.tools } : {}),
-          // A review pass resumes one provider session and sends only the new messages each turn.
-          makeProvider: (m) => makeProvider(m, true),
+          makeProvider: reviewProviderFactory(config, makeProvider),
           log,
           signal: cancel.signal,
         });

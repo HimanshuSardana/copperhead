@@ -12,6 +12,7 @@ import { CancelledError, normalizeProposal, type PassRecord, runPass } from '../
 import { digest, domainTask } from '../src/review/prompts.js';
 import { replayReview, runReview } from '../src/review/run.js';
 import { resolveTools, type ToolsClient, type ToolsResult } from '../src/review/tools-client.js';
+import { reviewProviderFactory } from '../src/util/cli-args.js';
 
 /**
  * `copperhead review` (grounded review): the orchestration, with a scripted model and a fake
@@ -345,14 +346,19 @@ describe('review: one pass', () => {
 });
 
 describe('review: providers that make an HTTP request', () => {
-  /** A server that never answers, and reports when a client gives up on it. */
-  async function silentServer(): Promise<{ url: string; closed: Promise<void>; stop: () => Promise<void> }> {
+  /** A server that never answers, and reports when a request arrives and when its client gives up. */
+  async function silentServer(): Promise<{ url: string; received: Promise<void>; closed: Promise<void>; stop: () => Promise<void> }> {
+    let onRequest!: () => void;
     let onClose!: () => void;
+    const received = new Promise<void>((r) => (onRequest = r));
     const closed = new Promise<void>((r) => (onClose = r));
-    const server = http.createServer((req) => req.on('close', onClose));
+    const server = http.createServer((req) => {
+      onRequest();
+      req.on('close', onClose);
+    });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
     const { port } = server.address() as AddressInfo;
-    return { url: `http://127.0.0.1:${port}`, closed, stop: () => new Promise<void>((r) => server.close(() => r())) };
+    return { url: `http://127.0.0.1:${port}`, received, closed, stop: () => new Promise<void>((r) => server.close(() => r())) };
   }
 
   it('cancels the request when the turn signal aborts', async () => {
@@ -367,7 +373,10 @@ describe('review: providers that make an HTTP request', () => {
       try {
         const turn = new AbortController();
         const pending = make(server.url).chat([{ role: 'user', content: 'hi' }], [], { signal: turn.signal });
-        setTimeout(() => turn.abort(), 100);
+        pending.catch(() => undefined);
+        // Abort only once the request is on the wire: the request itself must be cancelled.
+        await server.received;
+        turn.abort();
         await expect(pending).rejects.toThrow();
         await server.closed;
       } finally {
@@ -581,9 +590,27 @@ describe('review: the run and its record', () => {
     await expect(runReview({ ...base, resume: true, sources: ['docs'] })).rejects.toThrow(/--resume must name the record's inputs/);
     await mkdir(path.join(root, 'other-board'));
     await expect(runReview({ ...base, resume: true, design: 'other-board' })).rejects.toThrow(/--resume must name the record's inputs/);
+    // A run killed before its bundle was written is bound to its inputs as well.
+    await unlink(path.join(out, 'bundle.json'));
+    await expect(runReview({ ...base, resume: true, sources: ['docs'] })).rejects.toThrow(/--resume must name the record's inputs/);
     await unlink(path.join(out, 'inputs.json'));
-    await expect(runReview({ ...base, resume: true })).rejects.toThrow(/no readable inputs\.json/);
+    await expect(runReview({ ...base, resume: true })).rejects.toThrow(/holds no inputs\.json/);
+    // --resume does not make an unrelated directory a record.
+    await mkdir(path.join(root, 'notes'));
+    await writeFile(path.join(root, 'notes', 'todo.txt'), 'x');
+    await expect(runReview({ ...base, out: 'notes', resume: true })).rejects.toThrow(/holds no inputs\.json/);
+    expect(await readdir(path.join(root, 'notes'))).toEqual(['todo.txt']);
   }, 30_000);
+
+  it('hands review passes a compat model\'s endpoint and key variable', async () => {
+    const seen: unknown[] = [];
+    const factory = reviewProviderFactory({ baseURL: 'http://127.0.0.1:9/v1', apiKeyEnv: 'MY_KEY' } as never, async (model, sessionResume, compat) => {
+      seen.push([model, sessionResume, compat]);
+      return scriptedProvider([]);
+    }, {});
+    await factory('compat:local-model');
+    expect(seen).toEqual([['compat:local-model', true, { baseURL: 'http://127.0.0.1:9/v1', apiKeyEnv: 'MY_KEY' }]]);
+  });
 
   it('reports a cancellation that lands during the last copperhead-tools call as one', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));

@@ -86,6 +86,17 @@ async function emptyOrAbsent(dir: string): Promise<boolean> {
   }
 }
 
+/** Whether `dir` holds nothing but the empty `model/samples` a run creates before anything else. */
+async function onlySkeleton(dir: string): Promise<boolean> {
+  try {
+    const top = await readdir(dir);
+    const model = await readdir(path.join(dir, 'model'));
+    return top.length === 1 && top[0] === 'model' && model.length === 1 && model[0] === 'samples' && (await readdir(path.join(dir, 'model', 'samples'))).length === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** The real path of `p`, through symbolic links, for a path whose tail does not exist yet too. */
 async function canonical(p: string): Promise<string> {
   try {
@@ -173,15 +184,6 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   for (const input of [...o.sources.map(abs), ...fab]) {
     if (within(realOut, await canonical(input))) throw new Error(`--out must lie outside every input; it is inside ${input}`);
   }
-  await mkdir(path.join(out, 'model', 'samples'), { recursive: true });
-  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
-  const signal = o.signal;
-  const sig = signal ? { signal } : {};
-  const started = new Date();
-
-  // A bundle a killed run left half-written is rebuilt; no pass can have read it.
-  const resumable = o.resume && (await parses(path.join(out, 'bundle.json')));
-  if (o.resume && !resumable) log('resume: no bundle in the record; starting from the sweep');
   // What the record reviews, as this run names it. A resumed run must name the same: the bundle and
   // every kept pass were made from these inputs, and the lockfile it writes names them.
   const inputs = {
@@ -193,15 +195,35 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
     label: o.label ?? null,
   };
   const inputsPath = path.join(out, 'inputs.json');
-  if (resumable) {
-    let was: unknown = null;
+  if (o.resume) {
+    let text: string | null = null;
     try {
-      was = JSON.parse(await readFile(inputsPath, 'utf8'));
+      text = await readFile(inputsPath, 'utf8');
     } catch {
-      throw new Error(`--resume: the record has no readable inputs.json, so its inputs cannot be checked; start a new record`);
+      // absent: only a record a run left before it wrote anything can be resumed without it
     }
-    if (JSON.stringify(was) !== JSON.stringify(inputs)) throw new Error(`--resume must name the record's inputs, from the directory its review ran in: the record has ${JSON.stringify(was)}, this run names ${JSON.stringify(inputs)}`);
-  } else await writeAtomic(inputsPath, `${JSON.stringify(inputs, null, 1)}\n`);
+    if (text === null) {
+      if (!(await emptyOrAbsent(out)) && !(await onlySkeleton(out))) throw new Error(`--resume: ${out} holds no inputs.json, so it is not a review record this run can resume; give a new --out`);
+    } else {
+      let was: unknown;
+      try {
+        was = JSON.parse(text);
+      } catch {
+        throw new Error(`--resume: the record's inputs.json does not parse, so its inputs cannot be checked; start a new record`);
+      }
+      if (JSON.stringify(was) !== JSON.stringify(inputs)) throw new Error(`--resume must name the record's inputs, from the directory its review ran in: the record has ${JSON.stringify(was)}, this run names ${JSON.stringify(inputs)}`);
+    }
+  }
+  await mkdir(path.join(out, 'model', 'samples'), { recursive: true });
+  if (!(await exists(inputsPath))) await writeAtomic(inputsPath, `${JSON.stringify(inputs, null, 1)}\n`);
+  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
+  const signal = o.signal;
+  const sig = signal ? { signal } : {};
+  const started = new Date();
+
+  // A bundle a killed run left half-written is rebuilt; no pass can have read it.
+  const resumable = o.resume && (await parses(path.join(out, 'bundle.json')));
+  if (o.resume && !resumable) log('resume: no bundle in the record; starting from the sweep');
 
   // 1. sweep
   let sweepDir: string;
