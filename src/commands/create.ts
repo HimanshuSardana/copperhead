@@ -24,7 +24,7 @@ import { isDirty, commitAll, changedFiles, fileAtCommit, headCommit } from '../u
 import type { CompatSettings, CopperheadConfig } from '../config.js';
 import { checkDrift } from '../memory/drift.js';
 import { runAgentLoop, makeProvider, type BudgetExhaustedStats } from '../agent/loop.js';
-import { diagnoseStageFailure, transcriptExcerpt, withTimeout, symbolAvailabilityFacts, type StageDiagnosis } from '../agent/recovery.js';
+import { diagnoseStageFailure, lastToolResult, transcriptExcerpt, withTimeout, symbolAvailabilityFacts, type StageDiagnosis } from '../agent/recovery.js';
 import type { Provider } from '../agent/types.js';
 import type { RunMetaInput } from '../agent/runmeta.js';
 import { fmtDuration, fmtTokens, type ProgressRenderer } from '../agent/render.js';
@@ -502,6 +502,27 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   return (
     `${layoutDoc} has no "## Draft quality" section` +
     (stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '')
+  );
+}
+
+/**
+ * The guidance for another schematic attempt when the last one refused while
+ * draft_schematic still listed findings, or null. Those findings are the
+ * stage's own work, each naming its fix, and hosted models refuse over them
+ * when they pile up (a platform run on gpt-5.6-sol refused twice over a
+ * footprint the finding named, and the diagnosis stopped the run). So the
+ * refusal is answered in code, within the same attempt limit, rather than by
+ * the diagnosis model. It also says what the Footprint column holds, the
+ * confusion behind several of those findings.
+ */
+export function refusalOverFindings(stageName: string, outcome: string, lastDraft: string | null): string | null {
+  if (stageName !== 'schematic' || outcome !== 'refused' || !lastDraft || !/^intent validation: \d+ finding/.test(lastDraft)) return null;
+  return (
+    `The previous attempt refused while draft_schematic still listed ${lastDraft.replace(/^intent validation: /, '').replace(/:$/, '')}. ` +
+    'Those findings are this stage\'s work, not a reason to stop: each one names its fix. Where a finding says to change the footprint, ' +
+    'change it in BOM.md and the intent together, to the footprint it names; where it says to change the symbol, change the libId in the intent. ' +
+    "BOM.md's Footprint column holds a footprint id (a Lib:Name that check_footprints reports OK), never a symbol lib_id such as Connector:TestPoint. " +
+    'Then call draft_schematic again, and refuse only over what no edit to BOM.md or the intent can fix.'
   );
 }
 
@@ -1193,6 +1214,13 @@ export async function runCreate(opts: CreateOptions): Promise<{ ok: boolean; com
             ),
           );
           break;
+        }
+
+        const pushback = refusalOverFindings(stage.name, res.outcome, await lastToolResult(res.transcriptDir, 'draft_schematic'));
+        if (pushback) {
+          opts.log(stageLine(stage.name, `${failure}; the refusal is over draft findings this stage fixes, so it runs again`, 'warn'));
+          guidance = pushback;
+          continue;
         }
 
         opts.log(stageLine(stage.name, `${failure}; asking the model whether to retry…`, 'warn'));
