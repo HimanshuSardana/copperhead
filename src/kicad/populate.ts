@@ -753,39 +753,37 @@ export async function populateBoard(opts: PopulateOptions): Promise<PopulateResu
   const tops = childSpans(text, open);
   const stale = tops.filter((sp) => sp.tag === 'net' && !/^\(net\s+0\s+""\)$/.test(text.slice(sp.start, sp.end)));
   if (stale.length) {
-    // an item is on an old net by code, or by name where a board omits codes;
-    // a keepout or a net-0 track is on none of them
-    const codes = new Set<string>();
-    const names = new Set<string>();
-    for (const sp of stale) {
-      const m = /^\(net\s+(?:(\d+)\s+)?"((?:[^"\\]|\\.)*)"/.exec(text.slice(sp.start, sp.end));
-      if (m?.[1]) codes.add(m[1]);
-      if (m?.[2]) names.add(m[2]);
-    }
-    const onOldNet = (sp: Span): boolean => {
+    // copper on any net but 0 would land on whichever fresh net takes its code
+    // or name, declared in the old table or not; a keepout or a net-0 track is
+    // on none
+    const onANet = (sp: Span): boolean => {
       const body = text.slice(sp.start, sp.end);
       const code = /\(net\s+(\d+)[\s)]/.exec(body)?.[1];
       const name = /\(net(?:_name)?\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"\)/.exec(body)?.[1];
-      return (code !== undefined && codes.has(code)) || (name !== undefined && names.has(name));
+      return (code !== undefined && code !== '0') || !!name;
     };
-    const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onOldNet(sp)).length;
+    const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onANet(sp)).length;
     if (wired) {
       throw new Error(
-        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s), zone(s) or shape(s) on them; ` +
+        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s), zone(s) or shape(s) on a net; ` +
           'populate fills an empty board only: remove that copper, or start from the scaffolded board',
       );
     }
+    // a line the stale declarations fill goes whole, so the table left behind
+    // keeps its layout; one sharing its line with anything else (`(net 0 "")`)
+    // goes alone, clear of the insert after net 0
+    const byLine = new Map<number, Span[]>();
     for (const sp of stale) {
-      // the whole line when the declaration is alone on it, so the table left
-      // behind keeps its layout; else the declaration alone, which keeps clear
-      // of a neighbour on its line and of the insert after `(net 0 "")`
       const lineStart = text.lastIndexOf('\n', sp.start - 1) + 1;
-      const nl = text.indexOf('\n', sp.end);
+      byLine.set(lineStart, [...(byLine.get(lineStart) ?? []), sp]);
+    }
+    for (const [lineStart, spans] of byLine) {
+      const nl = text.indexOf('\n', spans[spans.length - 1]!.end);
       const lineEnd = nl < 0 ? text.length : nl;
-      const alone = !text.slice(lineStart, sp.start).trim() && !text.slice(sp.end, lineEnd).trim();
-      const at = alone ? lineStart : sp.start;
-      const end = alone && nl >= 0 ? nl + 1 : sp.end;
-      edits.push({ at, del: end - at, ins: '' });
+      let rest = text.slice(lineStart, lineEnd);
+      for (const sp of [...spans].reverse()) rest = rest.slice(0, sp.start - lineStart) + rest.slice(sp.end - lineStart);
+      if (!rest.trim()) edits.push({ at: lineStart, del: (nl < 0 ? lineEnd : nl + 1) - lineStart, ins: '' });
+      else for (const sp of spans) edits.push({ at: sp.start, del: sp.end - sp.start, ins: '' });
     }
   }
   const netDecl = netNames.map((n) => `\t(net ${code.get(n)} ${q(n)})`).join('\n');

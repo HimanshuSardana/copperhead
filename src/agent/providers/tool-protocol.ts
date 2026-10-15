@@ -127,13 +127,16 @@ function detectMalformedCall(text: string, catalog: Set<string>): string | undef
   // result it never got (I15), or concluding the engine is absent from the build and
   // refusing the stage outright (I18). Withholding the tool is the invariant; hiding
   // the reason never was, so name it and print the real catalog.
+  // The proposal advice only where the turn offers propose_change (the main
+  // loop always does); a skill or review pass has a fixed catalog of its own.
   if (offCatalog.length) {
     const named = offCatalog.map((n) => `"${n}"`).join(', ');
+    const unlock = catalog.has('propose_change')
+      ? 'Edit and drafting tools are withheld until a proposal validates — call propose_change, then validate_change, and they appear. '
+      : '';
     return (
-      `No call ran: ${named} ${offCatalog.length > 1 ? 'are' : 'is'} not in this turn's tool ` +
-      'catalog. Edit and drafting tools are withheld until a proposal validates — call ' +
-      'propose_change, then validate_change, and they appear. Do not conclude a tool is ' +
-      `missing from the build. Available this turn: ${[...catalog].join(', ')}.`
+      `No call ran: ${named} ${offCatalog.length > 1 ? 'are' : 'is'} not in this turn's tool catalog. ${unlock}` +
+      `Do not conclude a tool is missing from the build. Available this turn: ${[...catalog].join(', ')}.`
     );
   }
   // A native function-call block instead of the JSON protocol. Some models fall back to it from

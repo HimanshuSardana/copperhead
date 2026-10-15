@@ -496,11 +496,11 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
   const layoutDoc = path.posix.join(docs, 'LAYOUT.md');
   const state = await draftQualityState(root, layoutDoc);
   if (state === 'filled') return null;
-  if (state === 'duplicate') {
-    return `${layoutDoc} has more than one "## Draft quality" heading and the first is empty: keep one heading, with the assessment under it`;
-  }
   const stray = layoutDoc !== 'LAYOUT.md' && (await draftQualityState(root, 'LAYOUT.md')) === 'filled';
   const where = stray ? `; the section was written to LAYOUT.md at the repository root, which this stage does not read: put it in ${layoutDoc}` : '';
+  if (state === 'duplicate') {
+    return `${layoutDoc} has more than one "## Draft quality" heading and the first is empty: keep one heading, with the assessment under it${where}`;
+  }
   if (state === 'empty') {
     return `the "## Draft quality" section in ${layoutDoc} is empty: write what is fine, how many connections are still unrouted, and what a human should redo${where}`;
   }
@@ -517,15 +517,17 @@ export async function layoutDocGap(root: string, docs: string): Promise<string |
  * schematic stage: a run killed after Draft quality was written but before a
  * clean run_drc must not resume as complete and get its board committed
  * unverified. Cheapest first, since finish asks on every attempt: a file
- * read, then a netlist export, then a full DRC.
+ * read, then a netlist export, then a full DRC. `drcFailed` is for a caller
+ * that already knows the stage is incomplete: when the rest holds, DRC is
+ * what failed, and running it again would only cost time.
  */
-async function layoutDraftGap(root: string, docs: string): Promise<string | null> {
+async function layoutDraftGap(root: string, docs: string, opts: { drcFailed?: boolean } = {}): Promise<string | null> {
   const docGap = await layoutDocGap(root, docs);
   if (docGap) return docGap;
   const config = await loadConfig(root);
   const m = await boardMatchesSchematic(root, config);
   if (!m.ok) return `${m.detail}; restore the populated footprints (never add or rewrite them) and move them instead`;
-  if (!(await boardDrcOk(root, config.board!))) {
+  if (opts.drcFailed || !(await boardDrcOk(root, config.board!))) {
     return 'the board does not pass DRC; run run_drc and fix what it reports before finishing';
   }
   return null;
@@ -545,8 +547,9 @@ async function contractGapDetail(stageName: string, root: string, config: Copper
     }
   }
   if (stageName === 'layout-draft') {
-    // the same gap, in the same order, that finish was told
-    const gap = await layoutDraftGap(root, (await loadConfig(root)).docs);
+    // the same gap, in the same order, that finish was told; isComplete just ran
+    // the DRC, so it is not run again
+    const gap = await layoutDraftGap(root, (await loadConfig(root)).docs, { drcFailed: true });
     return gap ? `the layout-draft contract is not met: ${gap}` : generic;
   }
   if (stageName !== 'schematic' || !config.schematic) return generic;

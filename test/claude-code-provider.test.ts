@@ -219,8 +219,9 @@ describe('ClaudeCodeProvider — tool protocol', () => {
   // build, and refused stage 4. The lock still withholds; it just says so now.
   it('nudges with the real catalog when a well-formed call names a withheld tool (#I18)', async () => {
     const reply = '```json\n{"tool":"draft_schematic","args":{"intent_json":"schematic.intent.json"}}\n```';
+    const propose: ToolSchema = { name: 'propose_change', description: 'Propose a change', parameters: { type: 'object', properties: {} } };
     const provider = new ClaudeCodeProvider(undefined, fakeQuery([assistant(reply), result()]));
-    const turn = await provider.chat(messages, tools); // catalog = read_file, finish
+    const turn = await provider.chat(messages, [...tools, propose]); // the main loop's catalog always offers propose_change
     expect(turn.toolCalls).toHaveLength(0); // still not dispatched — the lock is structural
     expect(turn.nudge).toMatch(/draft_schematic/);
     expect(turn.nudge).toMatch(/propose_change/);
@@ -228,6 +229,16 @@ describe('ClaudeCodeProvider — tool protocol', () => {
     // The real catalog, so the model cannot invent one.
     expect(turn.nudge).toMatch(/read_file/);
     expect(turn.nudge).toMatch(/finish/);
+  });
+
+  it('names the catalog, without proposal advice, where the turn offers no propose_change (a skill)', async () => {
+    const reply = '```json\n{"tool":"finish","args":{}}\n```';
+    const provider = new ClaudeCodeProvider(undefined, fakeQuery([assistant(reply), result()]));
+    const turn = await provider.chat(messages, tools.filter((t) => t.name !== 'finish'));
+    expect(turn.toolCalls).toHaveLength(0);
+    expect(turn.nudge).toMatch(/"finish" is not in this turn's tool catalog/);
+    expect(turn.nudge).toMatch(/Available this turn: read_file\./);
+    expect(turn.nudge).not.toMatch(/propose_change/);
   });
 
   it('names every withheld tool when a turn calls more than one (#I18)', async () => {

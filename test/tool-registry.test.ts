@@ -548,8 +548,8 @@ describe('tool-registry catalog', () => {
         },
         // tool-less, cut too: the notice arrives as its nudge
         { text: 'thinking', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, nudge: notice, notice },
-        // a main-loop nudge (propose_change) names tools a skill does not have
-        { text: 'thinking', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, nudge: 'call propose_change, then validate_change' },
+        // a provider steer (a malformed call) still reaches the skill's model
+        { text: 'thinking', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 }, nudge: 'Re-emit it as exactly one complete JSON object' },
         { text: 'done', toolCalls: [], usage: { inputTokens: 1, outputTokens: 1 } },
       ];
       const provider: Provider = {
@@ -566,7 +566,7 @@ describe('tool-registry catalog', () => {
       expect(toolAt).toBeGreaterThanOrEqual(0);
       expect(second.findIndex((m) => m.role === 'user' && m.content === notice)).toBeGreaterThan(toolAt);
       expect(seen[2]!.at(-1)).toEqual({ role: 'user', content: notice });
-      expect(seen[3]!.at(-1)).toEqual({ role: 'user', content: 'Continue using tools until the report is complete.' });
+      expect(seen[3]!.at(-1)).toEqual({ role: 'user', content: 'Re-emit it as exactly one complete JSON object' });
       const events = (await readFile(path.join(ctx.transcript.dir, 'transcript.jsonl'), 'utf8'))
         .split('\n')
         .filter(Boolean)

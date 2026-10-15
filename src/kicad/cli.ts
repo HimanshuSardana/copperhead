@@ -286,9 +286,9 @@ async function runCheck(
   const out = path.join(dir, `${kind}.json`);
   const sub = kind === 'erc' ? ['sch', 'erc'] : ['pcb', 'drc'];
   // the board DRC reads, read first: a shared reference on it is never one
-  // footprint's own geometry (AC-15.41). Unreadable here, KiCad reports why.
-  const duplicateRefs =
-    kind === 'drc' ? await readFile(filePath, 'utf8').then(duplicateFootprintRefs, () => new Set<string>()) : undefined;
+  // footprint's own geometry (AC-15.41). A board this cannot read gets no
+  // finding excused, rather than every one that names a single reference.
+  const duplicateRefs = kind === 'drc' ? await readFile(filePath, 'utf8').then(duplicateFootprintRefs, () => null) : undefined;
   try {
     const res = await runKicad(
       [...sub, '--format', 'json', '--exit-code-violations', '--output', out, ...extraArgs, filePath],
@@ -307,7 +307,7 @@ async function runCheck(
         `kicad-cli ${kind} produced no report — the ${kind === 'erc' ? 'schematic' : 'board'} file likely fails to load in KiCad. kicad-cli output: ${detail || '(none)'}`,
       );
     }
-    return normalizeReport(raw, kind, duplicateRefs ? { duplicateRefs } : {});
+    return normalizeReport(raw, kind, duplicateRefs === null ? { excuse: false } : duplicateRefs ? { duplicateRefs } : {});
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

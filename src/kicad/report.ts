@@ -69,7 +69,11 @@ function normViolation(v: RawViolation, sheet?: string): Violation {
 export function normalizeReport(
   raw: unknown,
   source: 'erc' | 'drc',
-  opts: { duplicateRefs?: ReadonlySet<string> } = {},
+  opts: {
+    duplicateRefs?: ReadonlySet<string>;
+    /** false when the board's references could not be read: then nothing is excused */
+    excuse?: boolean;
+  } = {},
 ): CheckReport {
   const r = raw as {
     sheets?: { path?: string; violations?: RawViolation[] }[];
@@ -97,7 +101,7 @@ export function normalizeReport(
   const intrinsic: Violation[] = [];
   for (const v of r.violations ?? []) {
     const n = normViolation(v);
-    const owner = source === 'drc' ? footprintOwner(n) : null;
+    const owner = source === 'drc' && opts.excuse !== false ? footprintOwner(n) : null;
     if (owner && !unvouched.has(owner) && !duplicate.has(owner) && !joinsNets(n)) intrinsic.push(n);
     else violations.push(n);
   }

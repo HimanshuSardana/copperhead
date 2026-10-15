@@ -117,6 +117,12 @@ describe('findings inside one library footprint (#314)', () => {
     expect(twice.violations.map((x) => x.type)).toEqual(['hole_clearance']);
   });
 
+  it('excuses nothing when the board could not be read for its references', () => {
+    const r = normalizeReport({ violations: [v('hole_clearance', 'Pad A1 [GND] of J1 on F.Cu', 'NPTH pad of J1')] }, 'drc', { excuse: false });
+    expect(r.ok).toBe(false);
+    expect(r.intrinsic).toEqual([]);
+  });
+
   it('reads a reference carried by more than one footprint, in either KiCad syntax', () => {
     const board = [
       '(footprint "MountingHole:MountingHole_3.2mm_M3" (property "Reference" "H1" (at 0 0))',

@@ -204,9 +204,9 @@ describe('create layout-draft around board populate (#314)', () => {
       expect(gap).toContain('written to LAYOUT.md at the repository root');
       // the assessment written under a second heading below the placeholder
       await writeFile(path.join(root, 'docs', 'LAYOUT.md'), `${placeholder}\n## Draft quality\n\nPower routed.\n`, 'utf8');
-      expect(await layoutDocGap(root, 'docs/')).toBe(
-        'docs/LAYOUT.md has more than one "## Draft quality" heading and the first is empty: keep one heading, with the assessment under it',
-      );
+      const dup = await layoutDocGap(root, 'docs/');
+      expect(dup).toContain('docs/LAYOUT.md has more than one "## Draft quality" heading and the first is empty: keep one heading');
+      expect(dup).toContain('written to LAYOUT.md at the repository root');
     } finally {
       await rm(root, { recursive: true, force: true });
     }

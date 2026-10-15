@@ -427,7 +427,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         stripped.slice(close);
       await writeFile(board, stripped, 'utf8');
       await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
-        /no footprints but still declares \d+ net\(s\), with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on them/,
+        /no footprints but still declares \d+ net\(s\), with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
       );
       expect(await readFile(board, 'utf8')).toBe(stripped);
     } finally {
@@ -435,7 +435,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
     }
   });
 
-  it('removes a stale net that shares a line, and keeps a keepout zone that is on no net', async () => {
+  it('removes stale nets that share a line, and keeps a keepout zone that is on no net', async () => {
     const { repo, cleanup } = await draftedProject();
     try {
       await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
@@ -444,12 +444,15 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
       const open = populated.indexOf('(kicad_pcb');
       let stripped = populated;
       for (const sp of childSpans(populated, open).filter((x) => x.tag === 'footprint').reverse()) {
-        stripped = stripped.slice(0, sp.start) + stripped.slice(sp.end);
+        stripped = stripped.slice(0, populated.lastIndexOf('\n', sp.start - 1) + 1) + stripped.slice(sp.end + 1);
       }
       // an old net hand-edited onto the net 0 line, renamed since
       const net1 = /\n\t\(net 1 "[^"]*"\)/.exec(stripped)!;
       stripped = stripped.slice(0, net1.index) + stripped.slice(net1.index + net1[0].length);
       stripped = stripped.replace('(net 0 "")', '(net 0 "") (net 1 "A_MUCH_LONGER_OLD_NAME")');
+      // and two old nets that share a line with nothing else
+      const net23 = /\n\t(\(net 2 "[^"]*"\))\n\t(\(net 3 "[^"]*"\))/.exec(stripped)!;
+      stripped = stripped.replace(net23[0], `\n\t${net23[1]} ${net23[2]}`);
       const keepout =
         '\t(zone (net 0) (net_name "") (layers "F.Cu") (uuid "6f1a3c1e-0000-4000-8000-000000000002") (hatch edge 0.5)' +
         ' (connect_pads (clearance 0)) (min_thickness 0.25)' +
@@ -464,6 +467,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
       const fresh = childSpans(populated, open).filter((x) => x.tag === 'net').map((x) => populated.slice(x.start, x.end));
       expect(nets).toEqual(fresh);
       expect(again).not.toContain('A_MUCH_LONGER_OLD_NAME');
+      expect(again).not.toMatch(/\n[ \t]*\n/); // no line left holding only whitespace
       expect(tops.filter((x) => x.tag === 'zone')).toHaveLength(1);
       expect(await kicadLoadError(board)).toBeNull();
     } finally {
@@ -489,7 +493,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         stripped.slice(close);
       await writeFile(board, stripped, 'utf8');
       await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
-        /with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on them/,
+        /with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
       );
       expect(await readFile(board, 'utf8')).toBe(stripped);
     } finally {
