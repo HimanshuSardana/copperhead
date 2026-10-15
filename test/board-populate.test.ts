@@ -427,7 +427,7 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         stripped.slice(close);
       await writeFile(board, stripped, 'utf8');
       await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
-        /no footprints but still declares \d+ net\(s\), with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
+        /no footprints but still has 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
       );
       expect(await readFile(board, 'utf8')).toBe(stripped);
     } finally {
@@ -493,7 +493,36 @@ describe('populateBoard against kicad-cli (AC-15.36, AC-15.37)', () => {
         stripped.slice(close);
       await writeFile(board, stripped, 'utf8');
       await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
-        /with 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
+        /still has 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
+      );
+      expect(await readFile(board, 'utf8')).toBe(stripped);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('refuses copper on a net even when the old table is already gone', async () => {
+    const { repo, cleanup } = await draftedProject();
+    try {
+      await populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() });
+      const board = path.join(repo, PCB);
+      const populated = await readFile(board, 'utf8');
+      const open = populated.indexOf('(kicad_pcb');
+      let stripped = populated;
+      // every footprint and every net but net 0 deleted; one track left on code 1
+      for (const sp of childSpans(populated, open)
+        .filter((x) => x.tag === 'footprint' || (x.tag === 'net' && !populated.slice(x.start, x.end).startsWith('(net 0 ')))
+        .reverse()) {
+        stripped = stripped.slice(0, populated.lastIndexOf('\n', sp.start - 1) + 1) + stripped.slice(sp.end + 1);
+      }
+      const close = stripped.lastIndexOf(')');
+      stripped =
+        stripped.slice(0, close) +
+        '\t(segment (start 10 10) (end 20 10) (width 0.25) (layer "F.Cu") (net 1) (uuid "6f1a3c1e-0000-4000-8000-000000000004"))\n' +
+        stripped.slice(close);
+      await writeFile(board, stripped, 'utf8');
+      await expect(populateBoard({ repoRoot: repo, schematic: SCH, board: PCB, env: hermetic() })).rejects.toThrow(
+        /still has 1 track\(s\), via\(s\), zone\(s\) or shape\(s\) on a net/,
       );
       expect(await readFile(board, 'utf8')).toBe(stripped);
     } finally {

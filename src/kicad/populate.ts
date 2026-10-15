@@ -746,29 +746,28 @@ export async function populateBoard(opts: PopulateOptions): Promise<PopulateResu
       grown = true;
     }
   }
-  // A board with no footprints can still declare nets: one whose footprints
-  // were deleted keeps its old table. Its codes would collide with the fresh
-  // table, and KiCad reads a code by its first declaration, so the old table
-  // goes, unless copper on the board still refers to it.
+  // A board with no footprints can still carry what its old parts left: copper
+  // on a net would land on whichever fresh net takes its code or name, so it
+  // is refused, whether the old table still declares that net or not (a
+  // keepout or a net-0 track is on none). And its old net table would collide
+  // with the fresh one, KiCad reading a code by its first declaration, so it
+  // goes.
   const tops = childSpans(text, open);
+  const onANet = (sp: Span): boolean => {
+    const body = text.slice(sp.start, sp.end);
+    const code = /\(net\s+(\d+)[\s)]/.exec(body)?.[1];
+    const name = /\(net(?:_name)?\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"\)/.exec(body)?.[1];
+    return (code !== undefined && code !== '0') || !!name;
+  };
+  const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onANet(sp)).length;
+  if (wired) {
+    throw new Error(
+      `${opts.board} has no footprints but still has ${wired} track(s), via(s), zone(s) or shape(s) on a net; ` +
+        'populate fills an empty board only: remove that copper, or start from the scaffolded board',
+    );
+  }
   const stale = tops.filter((sp) => sp.tag === 'net' && !/^\(net\s+0\s+""\)$/.test(text.slice(sp.start, sp.end)));
   if (stale.length) {
-    // copper on any net but 0 would land on whichever fresh net takes its code
-    // or name, declared in the old table or not; a keepout or a net-0 track is
-    // on none
-    const onANet = (sp: Span): boolean => {
-      const body = text.slice(sp.start, sp.end);
-      const code = /\(net\s+(\d+)[\s)]/.exec(body)?.[1];
-      const name = /\(net(?:_name)?\s+(?:\d+\s+)?"((?:[^"\\]|\\.)*)"\)/.exec(body)?.[1];
-      return (code !== undefined && code !== '0') || !!name;
-    };
-    const wired = tops.filter((sp) => /^(segment|arc|via|zone|gr_)/.test(sp.tag) && onANet(sp)).length;
-    if (wired) {
-      throw new Error(
-        `${opts.board} has no footprints but still declares ${stale.length} net(s), with ${wired} track(s), via(s), zone(s) or shape(s) on a net; ` +
-          'populate fills an empty board only: remove that copper, or start from the scaffolded board',
-      );
-    }
     // a line the stale declarations fill goes whole, so the table left behind
     // keeps its layout; one sharing its line with anything else (`(net 0 "")`)
     // goes alone, clear of the insert after net 0
