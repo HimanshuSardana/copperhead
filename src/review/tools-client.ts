@@ -26,8 +26,10 @@ export interface ToolsClient {
 }
 
 /** Whether `name` is an executable file in one of `pathValue`'s directories. */
-async function onPath(name: string, pathValue: string, pathext: string | undefined): Promise<boolean> {
-  const exts = process.platform === 'win32' ? (pathext ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+async function onPath(name: string, pathValue: string): Promise<boolean> {
+  // spawn() runs without a shell, so only executable images it can launch
+  // count on Windows: a .cmd/.bat npm shim would fail on the first sweep (#404).
+  const exts = process.platform === 'win32' ? ['.com', '.exe'] : [''];
   for (const dir of pathValue.split(path.delimiter).filter(Boolean)) {
     for (const ext of exts) {
       const candidate = path.join(dir, name + ext);
@@ -57,7 +59,7 @@ export async function resolveTools(flag?: string, env = process.env): Promise<To
   } else {
     // Refuse a missing PATH client here, not on the first sweep after the
     // review record has already been created (#404).
-    if (!(await onPath('copperhead-tools', env.PATH ?? '', env.PATHEXT))) {
+    if (!(await onPath('copperhead-tools', env.PATH ?? ''))) {
       throw new ToolsError(
         'copperhead-tools not found on PATH; install it, or set COPPERHEAD_TOOLS / --tools to its cli.js or executable',
       );

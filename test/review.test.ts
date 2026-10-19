@@ -1,4 +1,4 @@
-import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { chmod, link, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -438,6 +438,27 @@ describe('review: the run and its record', () => {
     expect((await readdir(path.join(out, 'model', 'samples'))).some((f) => f.startsWith('L.json.interrupted-'))).toBe(true);
   }, 30_000);
 
+  it('resumes a record whose --sweep directory is gone once its bundle exists', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const design = path.join(root, 'design');
+    await mkdir(design);
+    const sweep = path.join(root, 'sweep-record');
+    const tools = fakeTools();
+    await tools.run('review', { 'out-dir': sweep });
+    const out = path.join(root, 'record');
+    const submitter = () => scriptedProvider([{ toolCalls: [{ name: 'submit', args: {} }] }]);
+    const base = { design, out, sweep, sources: [], model: 's', domains: ['P'], maxTurns: 5, maxMinutes: 5, parallel: 1, log: () => undefined, client: tools };
+    await runReview({ ...base, makeProvider: async () => submitter() });
+    await rm(sweep, { recursive: true });
+    let made = 0;
+    const res = await runReview({ ...base, resume: true, makeProvider: async () => (made++, submitter()) });
+    expect(made).toBe(0);
+    expect(res.passes.map((p) => [p.domain, p.outcome])).toEqual([['P', 'submitted']]);
+    // A record without a parsable bundle still needs its --sweep.
+    await unlink(path.join(out, 'bundle.json'));
+    await expect(runReview({ ...base, resume: true, makeProvider: async () => submitter() })).rejects.toThrow(/holds no review\.json/);
+  }, 30_000);
+
   it('prints the progress lines an editor extension parses', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
     const design = path.join(root, 'design');
@@ -722,16 +743,64 @@ describe('review: the run and its record', () => {
 
     const underFile = path.join(outIsFile, 'record');
     await expect(runReview({ ...base, out: underFile, client: fakeTools() })).rejects.toThrow(/cannot be created: a parent path is not a directory/);
+    // Windows reports ENOENT rather than ENOTDIR for both depths: walk the ancestors.
+    await expect(runReview({ ...base, out: path.join(outIsFile, 'a', 'b'), client: fakeTools() })).rejects.toThrow(/cannot be created: a parent path is not a directory/);
+    // --resume still refuses a file at --out.
+    await expect(runReview({ ...base, out: outIsFile, resume: true, client: fakeTools() })).rejects.toThrow(/exists and is not a directory/);
+
+    // Other stat errors are reported, not mistaken for an absent path.
+    const invalidOut = path.join(root, 'bad\0out');
+    await expect(runReview({ ...base, out: invalidOut, client: fakeTools() })).rejects.toThrow(/null bytes/);
 
     const emptySweep = path.join(root, 'empty-sweep');
     await mkdir(emptySweep);
     await expect(runReview({ ...base, out: path.join(root, 'sweep-empty-out'), sweep: emptySweep, client: fakeTools() })).rejects.toThrow(/holds no review\.json/);
+    // A --sweep stat error is reported too, before --out exists.
+    const invalidSweep = path.join(root, 'bad\0sweep');
+    const invalidSweepOut = path.join(root, 'sweep-invalid-out');
+    await expect(runReview({ ...base, out: invalidSweepOut, sweep: invalidSweep, client: fakeTools() })).rejects.toThrow(/null bytes/);
+    expect(await absent(invalidSweepOut)).toBe(true);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('reports an unreadable record rather than treating it as absent', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const out = path.join(root, 'locked');
+    await mkdir(out);
+    await chmod(out, 0o000);
+    try {
+      const base = { design: path.join(root, 'design'), out, resume: true, sources: [], model: 's', domains: ['P'], maxTurns: 1, maxMinutes: 1, parallel: 1, makeProvider: async () => scriptedProvider([]), log: () => undefined, client: fakeTools() };
+      await expect(runReview(base)).rejects.toThrow(/EACCES|permission denied/i);
+    } finally {
+      await chmod(out, 0o700);
+    }
   });
 });
 
 describe('review: the copperhead-tools client', () => {
   it('refuses a default client that is not on PATH', async () => {
     await expect(resolveTools(undefined, { PATH: '' })).rejects.toThrow(/not found on PATH/);
+  });
+  it.skipIf(process.platform === 'win32')('finds an executable copperhead-tools on PATH', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const file = path.join(dir, 'copperhead-tools');
+    await writeFile(file, '#!/bin/sh\n');
+    await chmod(file, 0o755);
+    expect((await resolveTools(undefined, { PATH: dir })).command).toEqual(['copperhead-tools']);
+  });
+  it.skipIf(process.platform === 'win32')('skips a non-executable file or a directory named copperhead-tools on PATH', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const file = path.join(dir, 'copperhead-tools');
+    await writeFile(file, '#!/bin/sh\n');
+    await chmod(file, 0o644);
+    await expect(resolveTools(undefined, { PATH: dir })).rejects.toThrow(/not found on PATH/);
+    const asDir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    await mkdir(path.join(asDir, 'copperhead-tools'));
+    await expect(resolveTools(undefined, { PATH: asDir })).rejects.toThrow(/not found on PATH/);
+  });
+  it.skipIf(process.platform !== 'win32')('does not accept a .cmd shim that spawn cannot run', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    await writeFile(path.join(dir, 'copperhead-tools.cmd'), '@echo off\r\n');
+    await expect(resolveTools(undefined, { PATH: dir, PATHEXT: '.COM;.EXE;.BAT;.CMD' })).rejects.toThrow(/not found on PATH/);
   });
   it('stops the tool process when cancelled', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));

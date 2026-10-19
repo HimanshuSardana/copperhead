@@ -78,6 +78,14 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+/** `stat`, or null when the path or a parent does not exist; any other error is real and rethrown. */
+async function statOrNull(p: string) {
+  return stat(p).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+    throw err;
+  });
+}
+
 /**
  * A record directory a run may create into: absent, or an existing directory.
  * Every other shape is refused before anything is written. A file at --out,
@@ -85,12 +93,20 @@ async function exists(p: string): Promise<boolean> {
  * with a raw ENOTDIR after the record skeleton had already been created (#404).
  */
 async function checkOut(out: string, resume: boolean): Promise<void> {
-  const st = await stat(out).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === 'ENOENT') return null;
-    if (err.code === 'ENOTDIR') throw new Error(`--out ${out} cannot be created: a parent path is not a directory`);
-    throw err;
-  });
-  if (!st) return;
+  const st = await statOrNull(out);
+  if (!st) {
+    // A missing path may still lie under a file: POSIX reports ENOTDIR for the
+    // full path, Windows reports ENOENT. Walk to the nearest existing ancestor
+    // so both platforms refuse it with the same message (#404).
+    for (let q = path.dirname(out); ; q = path.dirname(q)) {
+      const a = await statOrNull(q);
+      if (a) {
+        if (!a.isDirectory()) throw new Error(`--out ${out} cannot be created: a parent path is not a directory`);
+        return;
+      }
+      if (path.dirname(q) === q) return;
+    }
+  }
   if (!st.isDirectory()) throw new Error(`--out ${out} exists and is not a directory; give a new directory for the review record`);
   if (!resume && (await readdir(out)).length > 0) {
     throw new Error(`--out ${out} is not empty; give a new directory for the review record, or --resume it`);
@@ -103,10 +119,7 @@ async function checkOut(out: string, resume: boolean): Promise<void> {
  * reports "not empty" instead of the real error (#404).
  */
 async function checkSweep(sweep: string): Promise<void> {
-  const st = await stat(path.join(sweep, 'review.json')).catch((err: NodeJS.ErrnoException) => {
-    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
-    throw err;
-  });
+  const st = await statOrNull(path.join(sweep, 'review.json'));
   if (st?.isFile()) return;
   throw new Error(`--sweep ${sweep} holds no review.json; give a copperhead-tools review record, or omit --sweep to run the sweep`);
 }
@@ -241,7 +254,10 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   // --sweep or --out must leave the filesystem untouched, so rerunning the
   // identical command reports the real error rather than "not empty" (#404).
   const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
-  if (o.sweep) await checkSweep(abs(o.sweep));
+  // A resumable record already holds everything its passes read. Its original
+  // --sweep directory may be gone: the bundle, not the sweep, is reused.
+  const resumable = o.resume === true && (await parses(path.join(out, 'bundle.json')));
+  if (o.sweep && !resumable) await checkSweep(abs(o.sweep));
   await checkOut(out, o.resume ?? false);
   // Compared through symbolic links: a link outside the design that points into it is inside it.
   const realOut = await canonical(out);
@@ -287,7 +303,6 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   const started = new Date();
 
   // A bundle a killed run left half-written is rebuilt; no pass can have read it.
-  const resumable = o.resume && (await parses(path.join(out, 'bundle.json')));
   if (o.resume && !resumable) log('resume: no bundle in the record; starting from the sweep');
 
   // 1. sweep
