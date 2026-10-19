@@ -3,7 +3,7 @@
  * stdout. copperhead never imports that package; this subprocess boundary is the only coupling.
  */
 import { spawn } from 'node:child_process';
-import { access } from 'node:fs/promises';
+import { access, constants, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 export interface ToolsResult {
@@ -25,6 +25,23 @@ export interface ToolsClient {
   run(tool: string, inputs: Record<string, unknown>, opts?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal }): Promise<ToolsResult>;
 }
 
+/** Whether `name` is an executable file in one of `pathValue`'s directories. */
+async function onPath(name: string, pathValue: string, pathext: string | undefined): Promise<boolean> {
+  const exts = process.platform === 'win32' ? (pathext ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean) : [''];
+  for (const dir of pathValue.split(path.delimiter).filter(Boolean)) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, name + ext);
+      try {
+        await access(candidate, constants.X_OK);
+        if ((await stat(candidate)).isFile()) return true;
+      } catch {
+        // not this directory, or not an executable file
+      }
+    }
+  }
+  return false;
+}
+
 /** `--tools`, then COPPERHEAD_TOOLS (a cli.js or an executable), then `copperhead-tools` on PATH. */
 export async function resolveTools(flag?: string, env = process.env): Promise<ToolsClient> {
   const given = flag ?? env.COPPERHEAD_TOOLS;
@@ -38,6 +55,13 @@ export async function resolveTools(flag?: string, env = process.env): Promise<To
     }
     command = abs.endsWith('.js') ? [process.execPath, abs] : [abs];
   } else {
+    // Refuse a missing PATH client here, not on the first sweep after the
+    // review record has already been created (#404).
+    if (!(await onPath('copperhead-tools', env.PATH ?? '', env.PATHEXT))) {
+      throw new ToolsError(
+        'copperhead-tools not found on PATH; install it, or set COPPERHEAD_TOOLS / --tools to its cli.js or executable',
+      );
+    }
     command = ['copperhead-tools'];
   }
   return {

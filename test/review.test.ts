@@ -689,9 +689,50 @@ describe('review: the run and its record', () => {
     expect(await readdir(path.join(root, 'sweep-record'))).toEqual(['review.json']);
     expect(await readdir(path.join(design, 'empty'))).toEqual([]);
   });
+  it('refuses bad --tools, --sweep and --out input before writing the record (#404)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
+    const design = path.join(root, 'design');
+    await mkdir(design);
+    const base = { design, sources: [], model: 's', domains: ['P'], maxTurns: 1, maxMinutes: 1, parallel: 1, makeProvider: async () => scriptedProvider([]), log: () => undefined };
+    const absent = async (p: string): Promise<boolean> => {
+      try {
+        await readdir(p);
+        return false;
+      } catch (err) {
+        return (err as NodeJS.ErrnoException).code === 'ENOENT';
+      }
+    };
+
+    // A missing --tools leaves no record behind, so a rerun reports the same error.
+    const missingTools = path.join(root, 'tools-fail');
+    await expect(runReview({ ...base, out: missingTools, tools: path.join(root, 'nope.js') })).rejects.toThrow(/copperhead-tools not found/);
+    expect(await absent(missingTools)).toBe(true);
+
+    // A --sweep that is not a copperhead-tools record is refused before --out exists.
+    const missingSweep = path.join(root, 'sweep-fail');
+    await expect(runReview({ ...base, out: missingSweep, sweep: path.join(root, 'nosweep'), client: fakeTools() })).rejects.toThrow(/holds no review\.json/);
+    expect(await absent(missingSweep)).toBe(true);
+
+    const outIsFile = path.join(root, 'record-file');
+    await writeFile(outIsFile, 'keep me');
+    await expect(runReview({ ...base, out: outIsFile, client: fakeTools() })).rejects.toThrow(/exists and is not a directory/);
+    expect(await readFile(outIsFile, 'utf8')).toBe('keep me');
+    // The rerun reports the same error, not "not empty".
+    await expect(runReview({ ...base, out: outIsFile, client: fakeTools() })).rejects.toThrow(/exists and is not a directory/);
+
+    const underFile = path.join(outIsFile, 'record');
+    await expect(runReview({ ...base, out: underFile, client: fakeTools() })).rejects.toThrow(/cannot be created: a parent path is not a directory/);
+
+    const emptySweep = path.join(root, 'empty-sweep');
+    await mkdir(emptySweep);
+    await expect(runReview({ ...base, out: path.join(root, 'sweep-empty-out'), sweep: emptySweep, client: fakeTools() })).rejects.toThrow(/holds no review\.json/);
+  });
 });
 
 describe('review: the copperhead-tools client', () => {
+  it('refuses a default client that is not on PATH', async () => {
+    await expect(resolveTools(undefined, { PATH: '' })).rejects.toThrow(/not found on PATH/);
+  });
   it('stops the tool process when cancelled', async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'review-test-'));
     const pidFile = path.join(dir, 'pid');

@@ -78,11 +78,47 @@ async function exists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * A record directory a run may create into: absent, or an existing directory.
+ * Every other shape is refused before anything is written. A file at --out,
+ * or a path under one, used to be treated as absent and only failed later
+ * with a raw ENOTDIR after the record skeleton had already been created (#404).
+ */
+async function checkOut(out: string, resume: boolean): Promise<void> {
+  const st = await stat(out).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return null;
+    if (err.code === 'ENOTDIR') throw new Error(`--out ${out} cannot be created: a parent path is not a directory`);
+    throw err;
+  });
+  if (!st) return;
+  if (!st.isDirectory()) throw new Error(`--out ${out} exists and is not a directory; give a new directory for the review record`);
+  if (!resume && (await readdir(out)).length > 0) {
+    throw new Error(`--out ${out} is not empty; give a new directory for the review record, or --resume it`);
+  }
+}
+
+/**
+ * A --sweep record is a directory holding the sweep's review.json. Anything
+ * else is bad input and must be refused before --out is created, or the rerun
+ * reports "not empty" instead of the real error (#404).
+ */
+async function checkSweep(sweep: string): Promise<void> {
+  const st = await stat(path.join(sweep, 'review.json')).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return null;
+    throw err;
+  });
+  if (st?.isFile()) return;
+  throw new Error(`--sweep ${sweep} holds no review.json; give a copperhead-tools review record, or omit --sweep to run the sweep`);
+}
+
 async function emptyOrAbsent(dir: string): Promise<boolean> {
   try {
     return (await readdir(dir)).length === 0;
-  } catch {
-    return true;
+  } catch (err) {
+    // Only ENOENT means absent. ENOTDIR/EACCES are real states that a caller
+    // must hear about, not a new directory it may write into (#404).
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
+    throw err;
   }
 }
 
@@ -201,7 +237,12 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   positive('--max-turns', o.maxTurns, true);
   positive('--max-minutes', o.maxMinutes, false);
   positive('--parallel', o.parallel, true);
-  if (!o.resume && !(await emptyOrAbsent(out))) throw new Error(`--out ${out} is not empty; give a new directory for the review record, or --resume it`);
+  // Resolve every input before the record skeleton exists: a bad --tools,
+  // --sweep or --out must leave the filesystem untouched, so rerunning the
+  // identical command reports the real error rather than "not empty" (#404).
+  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
+  if (o.sweep) await checkSweep(abs(o.sweep));
+  await checkOut(out, o.resume ?? false);
   // Compared through symbolic links: a link outside the design that points into it is inside it.
   const realOut = await canonical(out);
   if (within(realOut, await canonical(design))) throw new Error('--out must lie outside the design directory: a review never writes into the design');
@@ -241,7 +282,6 @@ export async function runReview(o: ReviewOptions): Promise<ReviewOutcome> {
   }
   await mkdir(path.join(out, 'model', 'samples'), { recursive: true });
   if (!(await exists(inputsPath))) await writeAtomic(inputsPath, `${JSON.stringify(inputs, null, 1)}\n`);
-  const tools = runningIn(cwd, o.client ?? (await resolveTools(o.tools)));
   const signal = o.signal;
   const sig = signal ? { signal } : {};
   const started = new Date();
