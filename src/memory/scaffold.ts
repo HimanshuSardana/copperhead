@@ -12,6 +12,13 @@ export interface InitResult {
   created: string[];
   skipped: string[];
   refused: string[];
+  /**
+   * Why no pre-commit hook was installed, or null when the hook is in place
+   * (freshly installed or already ours) or hooks were not requested. A foreign
+   * hook means the commit-time `copperhead check` gate is off, so this is
+   * surfaced loudly by the CLI and carried in `--json` (#103).
+   */
+  hookSkipped: string | null;
 }
 
 const sha = (s: string): string => createHash('sha256').update(s).digest('hex');
@@ -145,14 +152,20 @@ write time. This directory is gitignored.
 
 const HOOK_MARKER = '# installed by copperhead init';
 
-async function installPreCommitHook(repoRoot: string): Promise<string | null> {
+type HookOutcome =
+  | { status: 'installed'; path: string }
+  | { status: 'already-installed' }
+  | { status: 'foreign-hook' }
+  | { status: 'no-hooks-dir' };
+
+async function installPreCommitHook(repoRoot: string): Promise<HookOutcome> {
   const hooksDir = path.join(repoRoot, '.git', 'hooks');
-  if (!existsSync(hooksDir)) return null;
+  if (!existsSync(hooksDir)) return { status: 'no-hooks-dir' };
   const hookPath = path.join(hooksDir, 'pre-commit');
   if (existsSync(hookPath)) {
     const existing = await readFile(hookPath, 'utf8');
-    if (existing.includes(HOOK_MARKER)) return null; // idempotent
-    return null; // never clobber a user's own hook
+    if (existing.includes(HOOK_MARKER)) return { status: 'already-installed' }; // idempotent
+    return { status: 'foreign-hook' }; // never clobber a user's own hook
   }
   const script = `#!/bin/sh
 ${HOOK_MARKER}
@@ -161,7 +174,7 @@ exec copperhead check
 `;
   await writeFile(hookPath, script, 'utf8');
   await chmod(hookPath, 0o755);
-  return hookPath;
+  return { status: 'installed', path: hookPath };
 }
 
 export interface InitOptions {
@@ -199,7 +212,7 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   const docsDir = path.join(repoRoot, config.docs);
   await mkdir(docsDir, { recursive: true });
 
-  const result: InitResult = { created: [], skipped: [], refused: [] };
+  const result: InitResult = { created: [], skipped: [], refused: [], hookSkipped: null };
   const hashes: Record<string, string> = { ...(config.generatedHashes ?? {}) };
   const appendOnly = new Set(['DECISIONS.md', 'CHANGELOG.md']);
 
@@ -248,7 +261,19 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
 
   if (opts.installHooks !== false) {
     const hook = await installPreCommitHook(repoRoot);
-    if (hook) result.created.push(path.relative(repoRoot, hook));
+    if (hook.status === 'installed') {
+      result.created.push(path.relative(repoRoot, hook.path));
+    } else if (hook.status === 'foreign-hook') {
+      // The user's own hook is left untouched, but the commit-time gate they
+      // were promised is off: that outcome must reach the user (#103).
+      result.hookSkipped =
+        '.git/hooks/pre-commit already exists and was not written by copperhead, so it was left untouched and the ' +
+        'commit-time "copperhead check" gate is NOT active. Add "copperhead check" to your existing hook, or run it in CI.';
+    } else if (hook.status === 'no-hooks-dir') {
+      result.hookSkipped =
+        'no .git/hooks directory, so no pre-commit hook was installed and the commit-time ' +
+        '"copperhead check" gate is NOT active. Restore the hooks directory and re-run init, or run the check in CI.';
+    }
   }
 
   return result;

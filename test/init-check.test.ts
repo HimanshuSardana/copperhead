@@ -155,6 +155,76 @@ describe('copperhead check (AC-2)', () => {
   }, 60_000);
 });
 
+describe('init reports when the pre-commit hook was not installed (#103)', () => {
+  it('installs the hook and reports no skip on a fresh repo', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toBeNull();
+      const hook = await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8');
+      expect(hook).toContain('# installed by copperhead init');
+      expect(res.created).toContain(path.join('.git', 'hooks', 'pre-commit'));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('is idempotent: re-running reports no skip and does not re-create', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      await runInit({ repoRoot: repo });
+      const before = await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8');
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toBeNull();
+      expect(await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8')).toBe(before);
+      expect(res.created).not.toContain(path.join('.git', 'hooks', 'pre-commit'));
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('reports the skip when the user\'s own hook is in the way, and preserves it', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      const hookPath = path.join(repo, '.git', 'hooks', 'pre-commit');
+      await writeFile(hookPath, '#!/bin/sh\nnpm run lint\n', 'utf8');
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toMatch(/already exists.*was not written by copperhead.*gate is NOT active/);
+      expect(res.hookSkipped).toContain('Add "copperhead check" to your existing hook');
+      // the foreign hook is never clobbered
+      expect(await readFile(hookPath, 'utf8')).toBe('#!/bin/sh\nnpm run lint\n');
+      // docs still scaffold normally; the skip fails nothing
+      expect(res.refused).toEqual([]);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('reports the skip when there is no .git/hooks directory', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      await rm(path.join(repo, '.git', 'hooks'), { recursive: true, force: true });
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toMatch(/no .git\/hooks directory.*gate is NOT active/);
+      // docs still scaffold normally
+      expect(existsSync(path.join(repo, 'docs', 'SPEC.md'))).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('stays silent about the hook when --no-hooks asked for no hook', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      const res = await runInit({ repoRoot: repo, installHooks: false });
+      expect(res.hookSkipped).toBeNull();
+      expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
 describe('check is LLM-free by construction (AC-2.1)', () => {
   it('the check command module graph never imports a provider or SDK', async () => {
     const { execa } = await import('execa');
