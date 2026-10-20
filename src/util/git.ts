@@ -170,6 +170,22 @@ async function restoreUntracked(repo: string, tree: string): Promise<void> {
   }
 }
 
+/**
+ * The hooks directory git actually consults (`git rev-parse --git-path
+ * hooks`): honors core.hooksPath (husky v5 and later) and resolves linked
+ * worktrees to the main repository's hooks. Null when git cannot resolve it
+ * (not a git repository, or git unavailable). init installs its pre-commit
+ * hook here so the file git runs is the file copperhead wrote (#103).
+ */
+export async function gitHooksDir(repo: string): Promise<string | null> {
+  try {
+    const p = await git(repo, ['rev-parse', '--git-path', 'hooks']);
+    return path.isAbsolute(p) ? p : path.join(repo, p);
+  } catch {
+    return null;
+  }
+}
+
 export async function isGitRepo(repo: string): Promise<boolean> {
   try {
     await git(repo, ['rev-parse', '--git-dir']);

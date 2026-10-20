@@ -5,6 +5,7 @@ import path from 'node:path';
 import { listSymbols, pinNets, type SchematicSymbol, type PinNet } from '../kicad/sexp.js';
 import { configPath, loadConfig, type CopperheadConfig } from '../config.js';
 import { resolveInRepo } from '../util/paths.js';
+import { gitHooksDir } from '../util/git.js';
 
 export class InitError extends Error {}
 
@@ -155,17 +156,31 @@ const HOOK_MARKER = '# installed by copperhead init';
 type HookOutcome =
   | { status: 'installed'; path: string }
   | { status: 'already-installed' }
-  | { status: 'foreign-hook' }
-  | { status: 'no-hooks-dir' };
+  | { status: 'foreign-hook'; path: string }
+  | { status: 'no-hooks-dir'; dir: string }
+  | { status: 'not-a-git-repo' };
+
+/** Repo-relative for display, or absolute when the path lies outside the repo. */
+function displayPath(repoRoot: string, abs: string): string {
+  const rel = path.relative(repoRoot, abs);
+  return rel && !rel.startsWith('..') && !path.isAbsolute(rel) ? rel : abs;
+}
 
 async function installPreCommitHook(repoRoot: string): Promise<HookOutcome> {
-  const hooksDir = path.join(repoRoot, '.git', 'hooks');
-  if (!existsSync(hooksDir)) return { status: 'no-hooks-dir' };
+  // Resolve the hooks directory the way git does, not the conventional path:
+  // husky v5 and later set core.hooksPath (e.g. .husky/_), and a linked
+  // worktree keeps its hooks in the main repository. Writing to .git/hooks in
+  // either setup installs a hook git never runs (#103).
+  const resolved = await gitHooksDir(repoRoot);
+  const hooksDir =
+    resolved ?? (existsSync(path.join(repoRoot, '.git')) ? path.join(repoRoot, '.git', 'hooks') : null);
+  if (!hooksDir) return { status: 'not-a-git-repo' };
   const hookPath = path.join(hooksDir, 'pre-commit');
+  if (!existsSync(hooksDir)) return { status: 'no-hooks-dir', dir: displayPath(repoRoot, hooksDir) };
   if (existsSync(hookPath)) {
     const existing = await readFile(hookPath, 'utf8');
     if (existing.includes(HOOK_MARKER)) return { status: 'already-installed' }; // idempotent
-    return { status: 'foreign-hook' }; // never clobber a user's own hook
+    return { status: 'foreign-hook', path: displayPath(repoRoot, hookPath) }; // never clobber a user's own hook
   }
   const script = `#!/bin/sh
 ${HOOK_MARKER}
@@ -262,17 +277,21 @@ export async function runInit(opts: InitOptions): Promise<InitResult> {
   if (opts.installHooks !== false) {
     const hook = await installPreCommitHook(repoRoot);
     if (hook.status === 'installed') {
-      result.created.push(path.relative(repoRoot, hook.path));
+      result.created.push(displayPath(repoRoot, hook.path));
     } else if (hook.status === 'foreign-hook') {
       // The user's own hook is left untouched, but the commit-time gate they
       // were promised is off: that outcome must reach the user (#103).
       result.hookSkipped =
-        '.git/hooks/pre-commit already exists and was not written by copperhead, so it was left untouched and the ' +
+        `${hook.path} already exists and was not written by copperhead, so it was left untouched and the ` +
         'commit-time "copperhead check" gate is NOT active. Add "copperhead check" to your existing hook, or run it in CI.';
     } else if (hook.status === 'no-hooks-dir') {
       result.hookSkipped =
-        'no .git/hooks directory, so no pre-commit hook was installed and the commit-time ' +
+        `no ${hook.dir} directory, so no pre-commit hook was installed and the commit-time ` +
         '"copperhead check" gate is NOT active. Restore the hooks directory and re-run init, or run the check in CI.';
+    } else if (hook.status === 'not-a-git-repo') {
+      result.hookSkipped =
+        'not a git repository, so no pre-commit hook was installed and the commit-time ' +
+        '"copperhead check" gate is NOT active. Run "copperhead check" in CI to keep the gate.';
     }
   }
 

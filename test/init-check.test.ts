@@ -3,6 +3,7 @@ import { readFile, writeFile, rm, mkdtemp, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { runInit, InitError } from '../src/memory/scaffold.js';
 import { runCheck } from '../src/commands/check.js';
@@ -212,6 +213,76 @@ describe('init reports when the pre-commit hook was not installed (#103)', () =>
       await cleanup();
     }
   });
+
+  it('follows core.hooksPath: a husky-managed foreign hook is reported, nothing written under .git/hooks', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      await mkdir(path.join(repo, '.husky', '_'), { recursive: true });
+      await writeFile(path.join(repo, '.husky', '_', 'pre-commit'), '#!/bin/sh\nnpx husky test\n', 'utf8');
+      await execa('git', ['config', 'core.hooksPath', '.husky/_'], { cwd: repo });
+      const res = await runInit({ repoRoot: repo });
+      // the managed location is named, so the advice points at the right file
+      expect(res.hookSkipped).toMatch(/\.husky\/_\/pre-commit already exists.*gate is NOT active/);
+      expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('installs into the shared hooks dir from a linked worktree', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    const wt = `${repo}-wt`;
+    await execa('git', ['worktree', 'add', wt], { cwd: repo });
+    try {
+      const res = await runInit({ repoRoot: wt });
+      expect(res.hookSkipped).toBeNull();
+      expect(await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8')).toContain(
+        '# installed by copperhead init',
+      );
+    } finally {
+      await execa('git', ['worktree', 'remove', '--force', wt], { cwd: repo });
+      await cleanup();
+    }
+  });
+
+  it('reports not-a-git-repo outside a git repository', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      await rm(path.join(repo, '.git'), { recursive: true, force: true });
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toMatch(/not a git repository.*gate is NOT active/);
+      expect(existsSync(path.join(repo, 'docs', 'SPEC.md'))).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('prints the warning on the CLI surface, not only in the result object', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      const hookPath = path.join(repo, '.git', 'hooks', 'pre-commit');
+      await writeFile(hookPath, '#!/bin/sh\nnpm run lint\n', 'utf8');
+      // `init` gates on kicad-cli; stub only the version preflight (no KiCad
+      // tooling is exercised by this path).
+      const bin = await mkdtemp(path.join(tmpdir(), 'copperhead-kicad-stub-'));
+      try {
+        await writeFile(path.join(bin, 'kicad-cli'), '#!/bin/sh\necho "kicad-cli 10.0.4"\n', { mode: 0o755 });
+        const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+        const res = await execa('npx', ['tsx', 'src/cli.ts', '--repo', repo, 'init'], {
+          cwd: ROOT,
+          env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` },
+          reject: false,
+        });
+        expect(res.exitCode).toBe(0);
+        expect(res.stdout).toMatch(/WARNING: pre-commit hook not installed/);
+        expect(await readFile(hookPath, 'utf8')).toBe('#!/bin/sh\nnpm run lint\n');
+      } finally {
+        await rm(bin, { recursive: true, force: true });
+      }
+    } finally {
+      await cleanup();
+    }
+  }, 120_000);
 
   it('stays silent about the hook when --no-hooks asked for no hook', async () => {
     const { repo, cleanup } = await tempFixtureRepo();
