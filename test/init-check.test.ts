@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFile, writeFile, rm, mkdtemp, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, rm, mkdtemp, mkdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -283,6 +283,82 @@ describe('init reports when the pre-commit hook was not installed (#103)', () =>
       await cleanup();
     }
   }, 120_000);
+
+  it('scopes the hook to the project when it lives in a monorepo subdirectory', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      await mkdir(path.join(repo, 'hw'));
+      await rename(path.join(repo, 'hardware'), path.join(repo, 'hw', 'hardware'));
+      const sub = path.join(repo, 'hw');
+      const res = await runInit({ repoRoot: sub });
+      expect(res.hookSkipped).toBeNull();
+      // git runs hooks from the worktree top, so the hook must name the subdir
+      const hook = await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8');
+      expect(hook).toContain('copperhead --repo "hw" check');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('refuses to write into a core.hooksPath outside the repository', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    const shared = await mkdtemp(path.join(tmpdir(), 'ch-shared-hooks-'));
+    const globalConfig = path.join(shared, 'gitconfig');
+    const savedGlobal = process.env.GIT_CONFIG_GLOBAL;
+    const savedSystem = process.env.GIT_CONFIG_SYSTEM;
+    try {
+      await writeFile(globalConfig, `[core]\n\thooksPath = ${shared}/hooks\n`, 'utf8');
+      process.env.GIT_CONFIG_GLOBAL = globalConfig;
+      process.env.GIT_CONFIG_SYSTEM = '/dev/null';
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toMatch(/outside this repository.*gate is NOT active/);
+      expect(res.hookSkipped).toContain('Add "copperhead check"');
+      expect(existsSync(path.join(shared, 'hooks', 'pre-commit'))).toBe(false);
+      expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(false);
+    } finally {
+      if (savedGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+      else process.env.GIT_CONFIG_GLOBAL = savedGlobal;
+      if (savedSystem === undefined) delete process.env.GIT_CONFIG_SYSTEM;
+      else process.env.GIT_CONFIG_SYSTEM = savedSystem;
+      await rm(shared, { recursive: true, force: true });
+      await cleanup();
+    }
+  });
+
+  it('reports unwritable hooks dirs instead of throwing', async () => {
+    if (process.platform === 'win32') return;
+    if (typeof process.getuid === 'function' && process.getuid() === 0) return;
+    const { repo, cleanup } = await tempFixtureRepo();
+    try {
+      const hooksDir = path.join(repo, '.git', 'hooks');
+      await execa('chmod', ['555', hooksDir]);
+      try {
+        const res = await runInit({ repoRoot: repo });
+        expect(res.hookSkipped).toMatch(/could not be written.*gate is NOT active/);
+        expect(existsSync(path.join(hooksDir, 'pre-commit'))).toBe(false);
+      } finally {
+        await execa('chmod', ['755', hooksDir]);
+      }
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('falls back to .git/hooks when git cannot resolve the hooks dir', async () => {
+    const { repo, cleanup } = await tempFixtureRepo();
+    const savedPath = process.env.PATH;
+    try {
+      process.env.PATH = await mkdtemp(path.join(tmpdir(), 'ch-empty-path-'));
+      const res = await runInit({ repoRoot: repo });
+      expect(res.hookSkipped).toBeNull();
+      expect(await readFile(path.join(repo, '.git', 'hooks', 'pre-commit'), 'utf8')).toContain(
+        '# installed by copperhead init',
+      );
+    } finally {
+      process.env.PATH = savedPath;
+      await cleanup();
+    }
+  });
 
   it('stays silent about the hook when --no-hooks asked for no hook', async () => {
     const { repo, cleanup } = await tempFixtureRepo();
